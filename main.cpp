@@ -193,7 +193,7 @@ std::vector<int> parse_ranks(Parse& parse, std::vector<std::string> const& sorte
             }
             std::vector<int> pe_ranks;
             for (int i = 0; i < count; ++i) {
-                ranks.push_back(hashed_ranks.at(pe_hashes[offset + i]));
+                pe_ranks.push_back(hashed_ranks.at(pe_hashes[offset + i]));
             }
             comm.send(send_buf(pe_ranks), destination(rank));
             offset += count;
@@ -242,7 +242,7 @@ int main(int argc, char const* argv[]) {
 
   auto total_splits = comm.allreduce_single(send_buf(splits.size()), kamping::op(kamping::ops::plus<>()));
 
-  std::print("PE {} has {} % of the splits ({}) \n", comm.rank(), (100.0 * splits.size()) / total_splits, splits.size());
+  std::print("PE {} has {:.2f} % of the splits ({}) \n", comm.rank(), (100.0 * splits.size()) / total_splits, splits.size());
 
 
   // Run hashes on each PE
@@ -250,8 +250,13 @@ int main(int argc, char const* argv[]) {
   auto parse = compute_dict(splits, data, params, comm);
   timer.stop();
   auto dict_size = comm.allreduce_single(send_buf(parse.dict.size()), kamping::op(kamping::ops::plus<>()));
-  std::print("PE {} has dictionary size {}, which is {} less then no of splits \n", comm.rank(), parse.dict.size(), splits.size() - parse.dict.size());
-  std::print("Dict size is {}% of the total input size \n", (100.0 * dict_size * params.window_size) / data.size());
+
+  //std::print("PE {} has dictionary size {} \n", comm.rank(), parse.dict.size());
+  if (comm.rank_signed() == 0) {
+      std::print("Dict size is {:.2f}% of the total input size \n", (100.0 * dict_size * params.window_size) / data.size());
+      std::print("Total dictionary size is {} phrases \n", dict_size);
+  }
+
 
   // parse contains vector of phrases and their hashes (locally)
   // Sort phrases globally
@@ -279,43 +284,33 @@ int main(int argc, char const* argv[]) {
   timer.stop();
 
   // Check the resulting parse
-
-  std::vector<char> input = read_file(params.input_path);
-  int pos = 0;
-  int misses = 0;
-  int rank_index = 0;
-  for (auto rank : lex_ranks) {
-      std::string cur = sorted_dict[rank];
-      std::vector<char> check = parse.dict[rank_index];
-      for (int i = 0; i < check.size(); ++i) {
-          //if (cur[i] != check[i]) {
-          //    int a = 0;
-          //}
-      }
-      if (pos != 0) {
-          cur.erase(0, params.window_size);
-      }
-
-      for (char & c : cur) {
-          if (pos >= input.size()) {
-              break;
+  if (comm.rank_signed() == 0) {
+      std::vector<char> input = read_file(params.input_path);
+      int pos = 0;
+      int misses = 0;
+      int rank_index = 0;
+      for (auto rank : lex_ranks) {
+          std::string cur = sorted_dict[rank];
+          if (pos != 0) {
+              cur.erase(0, params.window_size);
           }
-          if (input[pos] != c) {
-              std::print("Missmatch at position {}, expected {}, found {} \n", pos, input[pos], c);
-              ++misses;
+          for (char & c : cur) {
+              if (pos >= input.size()) {
+                  break;
+              }
+              if (input[pos] != c) {
+                  ++misses;
+              }
+              ++pos;
           }
-          if (misses >= 10) {
-              break;
-          }
-          ++pos;
+          ++rank_index;
       }
-      ++rank_index;
   }
 
-    std::ranges::sort(lex_ranks);
-    auto unique_end = std::ranges::unique(lex_ranks).begin();
-    int dups = lex_ranks.size() - std::distance(lex_ranks.begin(), unique_end);
-    std::print("Rank parse contains {} duplicates \n", dups);
+  std::ranges::sort(lex_ranks);
+  auto unique_end = std::ranges::unique(lex_ranks).begin();
+  int dups = lex_ranks.size() - std::distance(lex_ranks.begin(), unique_end);
+  std::print("PE {} parsing contains {} duplicates, the parsing has size {} \n", comm.rank_signed(), dups, lex_ranks.size());
 
 
   timer.aggregate_and_print(kamping::measurements::SimpleJsonPrinter<>(std::cout));
