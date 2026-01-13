@@ -51,17 +51,16 @@ struct rabin_karp {
         return hash;
     }
 
-
-    int kr_print(std::string s) {
-        uint64_t hash = 0;
-        //const uint64_t prime = 3355443229;     // next prime(2**31+2**30+2**27)
-        const uint64_t prime = 1999999973; //27162335252586509; // next prime (2**54 + 2**53 + 2**47 + 2**13)
-        for(size_t k=0;k<s.size();k++) {
-            int c = (unsigned char) s[k];
-            //assert(c>=0 && c< 256);
-            hash = (256*hash + c) % prime;    //  add char k
+    template<typename str>
+    uint64_t kr_print(str const& phrase) {
+        uint64_t loc_hash = 0;
+        const uint64_t loc_prime = 3355443229;     // next prime(2**31+2**30+2**27)
+        //const uint64_t prime = 1999999973; //27162335252586509; // next prime (2**54 + 2**53 + 2**47 + 2**13)
+        for(auto c : phrase) {
+             //assert(c>=0 && c< 256);
+            loc_hash = (256*loc_hash + c) % loc_prime;    //  add char k
         }
-        return hash;
+        return loc_hash;
 
     }
 
@@ -74,4 +73,5 @@ struct rabin_karp {
 
 
 };
+
 
