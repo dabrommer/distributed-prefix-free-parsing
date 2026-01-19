@@ -208,6 +208,68 @@ std::vector<int> parse_ranks(Parse& parse, std::vector<std::string> const& sorte
 
 }
 
+std::vector<unsigned char> sort_dict(std::vector<std::vector<char>>& dict, Communicator<>& comm) {
+
+   std::vector<unsigned char> phrases;
+   // todo: Estimate avg length of phrases based on window_size and p
+   phrases.reserve(dict.size() * 15 * 2);
+   for (auto const& c_vec : dict) {
+       phrases.insert(phrases.end(), c_vec.begin(), c_vec.end());
+       phrases.push_back(DELIMITER);
+   }
+
+   dict.clear();
+   auto result = run_sorter(phrases, comm);
+   return result;
+}
+
+std::pair<std::map<uint64_t, int>, int> remove_duplicates(std::vector<unsigned char>& phrases, Communicator<>& comm) {
+    uint64_t  first_hash = 0;
+    bool first_hash_set = false;
+    uint64_t prev_hash = 0;
+    uint64_t hash = 0;
+    int rank = 0;
+    std::map<uint64_t, int> sorted_hashes;
+    rabin_karp rk{};
+
+    for (int i = 0; i < phrases.size(); ++i) {
+        // End of phrase
+        if (phrases[i] == DELIMITER) {
+            if (!first_hash_set) {
+                first_hash = hash;
+                first_hash_set = true;
+                prev_hash = hash;
+                sorted_hashes.insert({hash, rank});
+                ++rank;
+            }
+            else if (hash != prev_hash) {
+                sorted_hashes.insert({hash, rank});
+                prev_hash = hash;
+                ++rank;
+            }
+            rk.reset();
+        }
+        else {
+            hash = rk.add_char_fingerprint(phrases[i]);
+        }
+    }
+
+    // Exchange last hashes to remove duplicates across PEs
+    // Each PE sends its last hash to the next PE and compares it to its first hash
+    auto next_pe = comm.rank_shifted_cyclic(1);
+    auto prev_pe = comm.rank_shifted_cyclic(-1);
+    auto res = comm.sendrecv<uint64_t>(send_buf(hash), destination(next_pe), source(prev_pe));
+    if (res.front() == first_hash) {
+        sorted_hashes.erase(first_hash);
+    }
+
+    // Compute offset for global ranks
+    int size =  sorted_hashes.size();
+    auto offset = comm.exscan_single(send_buf(size), op(kamping::ops::plus<>()));
+
+    return {sorted_hashes, offset};
+}
+
 std::vector<char> read_file(const std::string& filename) {
     std::ifstream file(filename, std::ios::binary);
 
