@@ -2,15 +2,13 @@ cmake_minimum_required(VERSION 3.31)
 project(PFP)
 
 set(CMAKE_CXX_STANDARD 23)
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -g")
 
-add_executable(PFP main.cpp)
 
 include(FetchContent)
-FetchContent_Declare(
-        kamping
-        GIT_REPOSITORY https://github.com/kamping-site/kamping.git
-        GIT_TAG v0.2.0
-)
+
+add_subdirectory(external/scalable-distributed-string-sorting)
+
 
 FetchContent_Declare(
         cli11
@@ -19,5 +17,10 @@ FetchContent_Declare(
 )
 
 
-FetchContent_MakeAvailable(kamping cli11 )
+FetchContent_MakeAvailable(cli11)
+
+add_executable(PFP main.cpp)
+
 target_link_libraries(PFP PRIVATE kamping::kamping CLI11::CLI11)
+target_link_libraries(PFP PRIVATE sort_caller_lib)
+

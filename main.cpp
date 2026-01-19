@@ -6,7 +6,8 @@
 #include "kamping/p2p/recv.hpp"
 #include "kamping/collectives/gather.hpp"
 #include "kamping/measurements/timer.hpp"
-#include <kamping/measurements/printer.hpp>
+#include "kamping/measurements/printer.hpp"
+#include "external/scalable-distributed-string-sorting/src/executables/sort_caller.cpp"
 
 #include <iostream>
 #include <ranges>
@@ -18,7 +19,9 @@
 
 #include "rabin-karp.hpp"
 
-template class std::vector<std::vector<char>> ;
+const unsigned char DELIMITER = 0;
+const unsigned char DOLLAR = 1;
+
 
 struct Parse {
     std::vector<std::vector<char>> dict;
@@ -76,7 +79,7 @@ Parse compute_dict(std::vector<int> const& splits, std::vector<char> const& data
   // Prepend $ to the first phrase
   if (comm.rank_signed() == 0) {
       std::vector<char> first_phrase;
-      first_phrase.push_back('0');
+      first_phrase.push_back(DOLLAR);
       first_phrase.insert(first_phrase.end(), data.begin(), data.begin() + splits[0] + params.window_size);
       update_parse(dict, kr, hashes, first_phrase);
   }
@@ -90,11 +93,11 @@ Parse compute_dict(std::vector<int> const& splits, std::vector<char> const& data
 
   // Debug for only one PE
   if (comm.size() == 1) {
-    // Append params.window_size many '0' to the last phrase
+    // Append params.window_size many $ to the last phrase
     auto begin = data.begin() + splits.back();
     std::vector<char> last_phrase(begin, data.end());
     for (int i = 0; i < params.window_size; i++) {
-        last_phrase.push_back('0');
+        last_phrase.push_back(DOLLAR);
     }
     update_parse(dict, kr, hashes, last_phrase);
     return Parse{dict, hashes};
@@ -106,12 +109,12 @@ Parse compute_dict(std::vector<int> const& splits, std::vector<char> const& data
   size_t prev_pe = comm.rank_shifted_cyclic(-1);
 
   // There is a dummy send recv between PE n and PE 0 to prevent UB caused by the implicit sendrecv done by kamping::sendrecv
-  // Rank n only needs to send to n - 1, but its last phrase needs window_size many '0' appended
+  // Rank n only needs to send to n - 1, but its last phrase needs window_size many $ appended
   if (comm.rank_signed() == comm.size_signed() - 1) {
     auto begin = data.begin() + splits.back();
     std::vector<char> last_phrase(begin, data.end());
     for (int i = 0; i < params.window_size; i++) {
-        last_phrase.push_back('0');
+        last_phrase.push_back(DOLLAR);
     }
     // Only send needed
     comm.sendrecv<char>(send_buf(phrase_to_send), destination(prev_pe), source(0));
@@ -350,64 +353,49 @@ int main(int argc, char const* argv[]) {
 
   auto& timer = kamping::measurements::timer();
 
-  timer.synchronize_and_start("Distribute data");
-
   // Distribute Data
+  timer.synchronize_and_start("Distribute data");
   auto data = open_file(params.input_path, params.window_size, comm);
-
   timer.stop();
 
-  
+  // Compute positions of splitters  
   timer.synchronize_and_start("Compute splitters");
   auto splits = compute_splitters(data, comm, params);
   timer.stop();
 
   auto total_splits = comm.allreduce_single(send_buf(splits.size()), kamping::op(kamping::ops::plus<>()));
 
-  //std::print("PE {} has {:.2f} % of the splits ({}) \n", comm.rank(), (100.0 * splits.size()) / total_splits, splits.size());
+
   std::string to_print = std::format("PE {} has {:.2f} % of the splits ({}) \n", comm.rank(), (100.0 * splits.size()) / total_splits, splits.size());
   printOnRoot(to_print, comm);
 
-  // Run hashes on each PE
+  // Compute phrases
   timer.synchronize_and_start("Compute dict");
   auto parse = compute_dict(splits, data, params, comm);
   timer.stop();
 
-  //if (comm.rank_signed() == 0) {
-      printSizeHistogram(parse.dict, comm);
-  //}
+  printSizeHistogram(parse.dict, comm);
   auto dict_size = comm.allreduce_single(send_buf(parse.dict.size()), kamping::op(kamping::ops::plus<>()));
 
-  //std::print("PE {} has dictionary size {} \n", comm.rank(), parse.dict.size());
   if (comm.rank_signed() == 0) {
       std::print("Dict size is {:.2f}% of the total input size \n", (100.0 * dict_size * params.window_size) / data.size());
       std::print("Total dictionary size is {} phrases \n", dict_size);
   }
 
 
-  // parse contains vector of phrases and their hashes (locally)
   // Sort phrases globally
   timer.synchronize_and_start("Global sort");
   auto sorted_dict = sort_dict(parse.dict, comm);
   timer.stop();
 
-  // remove duplicates
+  // Remove duplicates and hash sorted phrases
   timer.synchronize_and_start("Remove duplicates");
-  if (comm.rank_signed() == 0) {
-      int prev = sorted_dict.size();
-      auto ret = std::ranges::unique(sorted_dict.begin(), sorted_dict.end());
-      sorted_dict.erase(ret.begin(), ret.end());
-      int after = sorted_dict.size();
-      std::print("Removed {} duplicates \n", prev - after);
-
-  }
+  auto [phrase_map, offset] =  remove_duplicates(sorted_dict, comm);
   timer.stop();
 
   // Swap hashes with lexicographical rank
   timer.synchronize_and_start("Exchange hashes with ranks");
-
-  std::vector<int> lex_ranks = parse_ranks(parse, sorted_dict, comm, params.window_size);
-
+  std::vector<int> lex_ranks(); //= parse_ranks(parse, sorted_dict, comm, params.window_size);
   timer.stop();
 
   // Check the resulting parse
