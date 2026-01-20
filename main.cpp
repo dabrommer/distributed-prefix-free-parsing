@@ -8,6 +8,7 @@
 #include "kamping/measurements/timer.hpp"
 #include "kamping/measurements/printer.hpp"
 #include "external/scalable-distributed-string-sorting/src/executables/sort_caller.cpp"
+#include "AmsSort/AmsSort.hpp"
 
 #include <iostream>
 #include <ranges>
@@ -338,18 +339,64 @@ void printOnRoot(std::string const& to_print, Communicator<>& comm)
     }
 }
 
+struct Pair {
+    uint64_t key;
+    int value;
+
+    Pair(uint64_t key, int value) : key(key), value(value) {}
+
+    Pair() = default;
+};
+
+MPI_Datatype create_pair_type() {
+    MPI_Datatype pair_type;
+
+    int blocklengths[2] = {1, 1};
+
+    MPI_Datatype types[2] = {MPI_UINT64_T, MPI_INT};
+    MPI_Aint displacements[2];
+    displacements[0] = offsetof(Pair, key);
+    displacements[1] = offsetof(Pair, value);
+
+    MPI_Type_create_struct(2, blocklengths, displacements, types, &pair_type);
+    MPI_Type_commit(&pair_type);
+
+    return pair_type;
+}
+
+std::map<uint64_t, int> sort_hashes(std::map<uint64_t, int>& hashes, int offset, Communicator<>& comm) {
+
+    std::vector<Pair> hash_vec;
+
+    for (const auto& [key, value] : hashes) {
+        hash_vec.emplace_back(key, value + offset);
+    }
+
+    const int kway = 64;
+    auto pair_comp = [](const Pair& a, const Pair& b) {
+        return a.key < b.key;
+    };
+    std::random_device rd;
+    std::mt19937_64 gen(rd());
+
+    Ams::sort(create_pair_type(), hash_vec, kway, gen, comm.mpi_communicator(), pair_comp);
+    std::map<uint64_t, int> sorted_map;
+    for (const auto& p : hash_vec) {
+        sorted_map.insert({p.key, p.value});
+    }
+    return sorted_map;
+}
+
 
 int main(int argc, char const* argv[]) {
   kamping::Environment env;
   kamping::Communicator comm;
 
-
-
   Params params = read_parameters(argc, argv);
 
   std::string out_name = params.input_path+ "_n_" + std::to_string(comm.size()) + "_w_" + std::to_string(params.window_size) + "_p_" + std::to_string(params.p_mod) + ".txt";
-  FILE* fp = std::freopen(out_name.c_str(), "w", stdout); // redirect stdout
-  if (!fp) return 1;
+  //FILE* fp = std::freopen(out_name.c_str(), "w", stdout); // redirect stdout
+  //if (!fp) return 1;
 
   auto& timer = kamping::measurements::timer();
 
@@ -394,40 +441,14 @@ int main(int argc, char const* argv[]) {
   timer.stop();
 
   // Swap hashes with lexicographical rank
-  timer.synchronize_and_start("Exchange hashes with ranks");
-  std::vector<int> lex_ranks(); //= parse_ranks(parse, sorted_dict, comm, params.window_size);
+  timer.synchronize_and_start("Sort hashes");
+
+  auto sorted_hashes = sort_hashes(phrase_map, offset, comm);
+  std::cout << "Min hash on PE " << comm.rank() << " is " << sorted_hashes.begin()->first << " with rank " << sorted_hashes.begin()->second + offset << "\n";
+  std::cout << "Max hash on PE " << comm.rank() << " is " << sorted_hashes.rbegin()->first << " with rank " << sorted_hashes.rbegin()->second + offset << "\n";
   timer.stop();
-
-  // Check the resulting parse
-  if (comm.rank_signed() == 0) {
-      std::vector<char> input = read_file(params.input_path);
-      int pos = 0;
-      int misses = 0;
-      int rank_index = 0;
-      for (auto rank : lex_ranks) {
-          std::string cur = sorted_dict[rank];
-          if (pos != 0) {
-              cur.erase(0, params.window_size);
-          }
-          for (char & c : cur) {
-              if (pos >= input.size()) {
-                  break;
-              }
-              if (input[pos] != c) {
-                  ++misses;
-              }
-              ++pos;
-          }
-          ++rank_index;
-      }
-  }
-
-  std::ranges::sort(lex_ranks);
-  auto unique_end = std::ranges::unique(lex_ranks).begin();
-  int dups = lex_ranks.size() - std::distance(lex_ranks.begin(), unique_end);
-  //std::print("PE {} parsing contains {} duplicates, the parsing has size {} \n", comm.rank_signed(), dups, lex_ranks.size());
 
 
   timer.aggregate_and_print(kamping::measurements::SimpleJsonPrinter<>(std::cout));
-  std::fclose(fp);
+  //std::fclose(fp);
 }
