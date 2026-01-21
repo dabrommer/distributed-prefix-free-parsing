@@ -29,6 +29,15 @@ struct Parse {
     std::vector<uint64_t> hashes;
 };
 
+struct Pair {
+    uint64_t key;
+    int value;
+
+    Pair(uint64_t key, int value) : key(key), value(value) {}
+
+    Pair() = default;
+};
+
 struct phrase_vector {
     std::vector<char> phrases;
     std::vector<size_t> offsets;
@@ -161,7 +170,6 @@ std::vector<std::string> sort_dict(std::vector<std::vector<char>> const& dict, C
        std::sort(flat_dict.begin(), flat_dict.end());
        return flat_dict;
    }
-
    return {};
 }
 
@@ -215,7 +223,7 @@ std::vector<int> parse_ranks(Parse& parse, std::vector<std::string> const& sorte
 std::vector<unsigned char> sort_dict(std::vector<std::vector<char>>& dict, Communicator<>& comm) {
 
    std::vector<unsigned char> phrases;
-   // todo: Estimate avg length of phrases based on window_size and p
+   // todo: Estimate avg length of phrases based on window_size and p --> change dict to add '0' directly
    phrases.reserve(dict.size() * 15 * 2);
    for (auto const& c_vec : dict) {
        phrases.insert(phrases.end(), c_vec.begin(), c_vec.end());
@@ -227,13 +235,13 @@ std::vector<unsigned char> sort_dict(std::vector<std::vector<char>>& dict, Commu
    return result;
 }
 
-std::pair<std::map<uint64_t, int>, int> remove_duplicates(std::vector<unsigned char>& phrases, Communicator<>& comm) {
+std::pair<std::vector<Pair>, int> remove_duplicates(std::vector<unsigned char>& phrases, Communicator<>& comm) {
     uint64_t  first_hash = 0;
     bool first_hash_set = false;
     uint64_t prev_hash = 0;
     uint64_t hash = 0;
     int rank = 0;
-    std::map<uint64_t, int> sorted_hashes;
+    std::vector<Pair> sorted_hashes;
     rabin_karp rk{};
 
     for (int i = 0; i < phrases.size(); ++i) {
@@ -243,11 +251,11 @@ std::pair<std::map<uint64_t, int>, int> remove_duplicates(std::vector<unsigned c
                 first_hash = hash;
                 first_hash_set = true;
                 prev_hash = hash;
-                sorted_hashes.insert({hash, rank});
+                sorted_hashes.emplace_back(hash, rank);
                 ++rank;
             }
             else if (hash != prev_hash) {
-                sorted_hashes.insert({hash, rank});
+                sorted_hashes.emplace_back(hash, rank);
                 prev_hash = hash;
                 ++rank;
             }
@@ -264,7 +272,7 @@ std::pair<std::map<uint64_t, int>, int> remove_duplicates(std::vector<unsigned c
     auto prev_pe = comm.rank_shifted_cyclic(-1);
     auto res = comm.sendrecv<uint64_t>(send_buf(hash), destination(next_pe), source(prev_pe));
     if (res.front() == first_hash) {
-        sorted_hashes.erase(first_hash);
+        sorted_hashes.erase(sorted_hashes.begin());
     }
 
     // Compute offset for global ranks
@@ -339,14 +347,7 @@ void printOnRoot(std::string const& to_print, Communicator<>& comm)
     }
 }
 
-struct Pair {
-    uint64_t key;
-    int value;
 
-    Pair(uint64_t key, int value) : key(key), value(value) {}
-
-    Pair() = default;
-};
 
 MPI_Datatype create_pair_type() {
     MPI_Datatype pair_type;
@@ -364,13 +365,7 @@ MPI_Datatype create_pair_type() {
     return pair_type;
 }
 
-std::map<uint64_t, int> sort_hashes(std::map<uint64_t, int>& hashes, int offset, Communicator<>& comm) {
-
-    std::vector<Pair> hash_vec;
-
-    for (const auto& [key, value] : hashes) {
-        hash_vec.emplace_back(key, value + offset);
-    }
+std::map<uint64_t, int> sort_hashes(std::vector<Pair>& hash_vec, int offset, Communicator<>& comm) {
 
     const int kway = 64;
     auto pair_comp = [](const Pair& a, const Pair& b) {
@@ -385,6 +380,26 @@ std::map<uint64_t, int> sort_hashes(std::map<uint64_t, int>& hashes, int offset,
         sorted_map.insert({p.key, p.value});
     }
     return sorted_map;
+}
+
+bool check_sort(const std::vector<unsigned char>& to_check)
+{
+    std::string prev;
+    std::string curr;
+
+    for (const auto c : to_check) {
+        curr.push_back(c);
+        if (c == DELIMITER) {
+            int check = curr.compare(prev);
+            if (check < 0) {
+                std::print("Error: {} is smaller than {} \n", curr, prev);
+                return false;
+            }
+            prev = curr;
+            curr = "";
+        }
+    }
+    return true;
 }
 
 
@@ -415,7 +430,7 @@ int main(int argc, char const* argv[]) {
 
   std::string to_print = std::format("PE {} has {:.2f} % of the splits ({}) \n", comm.rank(), (100.0 * splits.size()) / total_splits, splits.size());
   printOnRoot(to_print, comm);
-
+  comm.barrier();
   // Compute phrases
   timer.synchronize_and_start("Compute dict");
   auto parse = compute_dict(splits, data, params, comm);
@@ -428,12 +443,16 @@ int main(int argc, char const* argv[]) {
       std::print("Dict size is {:.2f}% of the total input size \n", (100.0 * dict_size * params.window_size) / data.size());
       std::print("Total dictionary size is {} phrases \n", dict_size);
   }
+  comm.barrier();
 
 
   // Sort phrases globally
   timer.synchronize_and_start("Global sort");
   auto sorted_dict = sort_dict(parse.dict, comm);
   timer.stop();
+
+  bool check = check_sort(sorted_dict);
+  printOnRoot(std::to_string(check), comm);
 
   // Remove duplicates and hash sorted phrases
   timer.synchronize_and_start("Remove duplicates");
@@ -444,8 +463,8 @@ int main(int argc, char const* argv[]) {
   timer.synchronize_and_start("Sort hashes");
 
   auto sorted_hashes = sort_hashes(phrase_map, offset, comm);
-  std::cout << "Min hash on PE " << comm.rank() << " is " << sorted_hashes.begin()->first << " with rank " << sorted_hashes.begin()->second + offset << "\n";
-  std::cout << "Max hash on PE " << comm.rank() << " is " << sorted_hashes.rbegin()->first << " with rank " << sorted_hashes.rbegin()->second + offset << "\n";
+  //std::cout << "Min hash on PE " << comm.rank() << " is " << sorted_hashes.begin()->first << " with rank " << sorted_hashes.begin()->second + offset << "\n";
+  //std::cout << "Max hash on PE " << comm.rank() << " is " << sorted_hashes.rbegin()->first << " with rank " << sorted_hashes.rbegin()->second + offset << "\n";
   timer.stop();
 
 
