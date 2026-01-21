@@ -9,6 +9,7 @@ include(FetchContent)
 
 add_subdirectory(external/scalable-distributed-string-sorting)
 
+
 FetchContent_Declare(
         kadis
         GIT_REPOSITORY https://github.com/MichaelAxtmann/KaDiS.git
@@ -27,12 +28,17 @@ FetchContent_Declare(
         GIT_REPOSITORY https://github.com/CLIUtils/CLI11.git
         GIT_TAG v2.6.1
 )
-
-
 FetchContent_MakeAvailable(cli11 kamping kadis)
 
-add_executable(PFP main.cpp)
+add_library(base)
+target_include_directories(base PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(base PUBLIC kamping::kamping kadis CLI11::CLI11)
 
-target_link_libraries(PFP PRIVATE kamping::kamping CLI11::CLI11 kadis)
+add_subdirectory(src)
+
+add_executable(PFP src/executables/pfp_runner.cpp)
+
+
+target_link_libraries(PFP PRIVATE base)
 target_link_libraries(PFP PRIVATE sort_caller_lib)
 

@@ -1,5 +1,5 @@
-#include "DataDistribution.hpp"
-#include "Parser.hpp"
+#include "mpi/data_distribution.hpp"
+#include "util/cli_parser.hpp"
 #include "kamping/collectives/allreduce.hpp"
 #include "kamping/p2p/sendrecv.hpp"
 #include "kamping/p2p/send.hpp"
@@ -7,18 +7,15 @@
 #include "kamping/collectives/gather.hpp"
 #include "kamping/measurements/timer.hpp"
 #include "kamping/measurements/printer.hpp"
-#include "external/scalable-distributed-string-sorting/src/executables/sort_caller.cpp"
+#include "../../external/scalable-distributed-string-sorting/src/executables/sort_caller.cpp"
 #include "AmsSort/AmsSort.hpp"
 
 #include <iostream>
 #include <ranges>
-#include <span>
 #include <print>
 #include <vector>
 
-
-
-#include "rabin-karp.hpp"
+#include "hash/rabin-karp.hpp"
 
 const unsigned char DELIMITER = 0;
 const unsigned char DOLLAR = 1;
