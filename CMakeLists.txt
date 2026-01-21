@@ -4,6 +4,22 @@ project(PFP)
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -g")
 
+# Format target
+find_program(CLANG_FORMAT "clang-format")
+if(CLANG_FORMAT)
+
+    file(GLOB_RECURSE SRC_FILES
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp"
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/*.hpp"
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/*.h"
+    )
+
+    add_custom_target(fix-format
+            COMMAND ${CLANG_FORMAT} -i -style=file ${SRC_FILES}
+    )
+else()
+    message(WARNING "clang-format not found. The 'format' target will not be available.")
+endif()
 
 include(FetchContent)
 
@@ -41,4 +57,6 @@ add_executable(PFP src/executables/pfp_runner.cpp)
 
 target_link_libraries(PFP PRIVATE base)
 target_link_libraries(PFP PRIVATE sort_caller_lib)
+
+
 
