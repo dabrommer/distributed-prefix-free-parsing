@@ -25,7 +25,7 @@ const unsigned char DOLLAR = 1;
 
 
 struct Parse {
-    std::vector<std::vector<char>> dict;
+    std::vector<unsigned char> dict;
     std::vector<uint64_t> hashes;
 };
 
@@ -75,37 +75,38 @@ std::vector<int> compute_splitters(std::vector<char>& data, Communicator<>& comm
   return splits;
 }
 
-void update_parse(std::vector<std::vector<char>>& dict, rabin_karp& rk, std::vector<uint64_t>& hashes, const std::vector<char>& phrase) {
-  uint64_t hash = rk.kr_print(phrase);
+void update_parse(std::vector<unsigned char>& dict, rabin_karp& rk, std::vector<uint64_t>& hashes, const std::vector<unsigned char>& phrase) {
+  const uint64_t hash = rk.kr_print(phrase);
   hashes.push_back(hash);
-  dict.push_back(phrase);
+  dict.insert(dict.end(), phrase.begin(), phrase.end());
+  dict.push_back(DELIMITER);
 }
 
 Parse compute_dict(std::vector<int> const& splits, std::vector<char> const& data, const Params& params, Communicator<>& comm) {
-  std::vector<std::vector<char>> dict;
+  std::vector<unsigned char> dict;
   rabin_karp kr(params.window_size);
   std::vector<uint64_t> hashes;
   hashes.reserve(splits.size());
   // Prepend $ to the first phrase
   if (comm.rank_signed() == 0) {
-      std::vector<char> first_phrase;
+      std::vector<unsigned char> first_phrase;
       first_phrase.push_back(DOLLAR);
       first_phrase.insert(first_phrase.end(), data.begin(), data.begin() + splits[0] + params.window_size);
       update_parse(dict, kr, hashes, first_phrase);
   }
-
+// todo: phrases miss initial window_size chars
   // Extract all phrases except the last one
   for (int i = 0; i < splits.size() - 1; i++) {
     auto begin = data.begin() + splits[i];
     auto end = data.begin() + splits[i + 1] + params.window_size;
-    update_parse(dict, kr, hashes, std::vector<char>(begin, end));
+    update_parse(dict, kr, hashes, std::vector<unsigned char>(begin, end));
   }
 
   // Debug for only one PE
   if (comm.size() == 1) {
     // Append params.window_size many $ to the last phrase
     auto begin = data.begin() + splits.back();
-    std::vector<char> last_phrase(begin, data.end());
+    std::vector<unsigned char> last_phrase(begin, data.end());
     for (int i = 0; i < params.window_size; i++) {
         last_phrase.push_back(DOLLAR);
     }
@@ -115,19 +116,19 @@ Parse compute_dict(std::vector<int> const& splits, std::vector<char> const& data
 
   // Send the chars before the first splitter to the previous PE
   int first_split = splits.front();
-  std::vector<char> phrase_to_send(data.begin() + params.window_size, data.begin() + first_split + params.window_size);
+  std::vector<unsigned char> phrase_to_send(data.begin() + params.window_size, data.begin() + first_split + params.window_size);
   size_t prev_pe = comm.rank_shifted_cyclic(-1);
 
   // There is a dummy send recv between PE n and PE 0 to prevent UB caused by the implicit sendrecv done by kamping::sendrecv
   // Rank n only needs to send to n - 1, but its last phrase needs window_size many $ appended
   if (comm.rank_signed() == comm.size_signed() - 1) {
     auto begin = data.begin() + splits.back();
-    std::vector<char> last_phrase(begin, data.end());
+    std::vector<unsigned char> last_phrase(begin, data.end());
     for (int i = 0; i < params.window_size; i++) {
         last_phrase.push_back(DOLLAR);
     }
     // Only send needed
-    comm.sendrecv<char>(send_buf(phrase_to_send), destination(prev_pe), source(0));
+    comm.sendrecv<unsigned char>(send_buf(phrase_to_send), destination(prev_pe), source(0));
     update_parse(dict, kr, hashes, last_phrase);
     return Parse{dict, hashes};
   }
@@ -135,11 +136,11 @@ Parse compute_dict(std::vector<int> const& splits, std::vector<char> const& data
   int last_split = splits.back();
   std::vector<char> phrase;
   size_t next_pe = comm.rank_shifted_cyclic(1);
-  std::vector<char> last_phrase(data.begin() + last_split, data.end());
+  std::vector<unsigned char> last_phrase(data.begin() + last_split, data.end());
 
   // Rank 0 only needs to receive
   if (comm.rank_signed() == 0) {
-    comm.sendrecv(send_buf(ignore<char>), destination(prev_pe), source(next_pe), recv_buf<BufferResizePolicy::resize_to_fit>(phrase));
+    comm.sendrecv(send_buf(ignore<unsigned char>), destination(prev_pe), source(next_pe), recv_buf<BufferResizePolicy::resize_to_fit>(phrase));
   }
   // All other ranks i send to i - 1 and receive from i + 1
   else {
@@ -220,18 +221,9 @@ std::vector<int> parse_ranks(Parse& parse, std::vector<std::string> const& sorte
 
 }
 
-std::vector<unsigned char> sort_dict(std::vector<std::vector<char>>& dict, Communicator<>& comm) {
+std::vector<unsigned char> sort_dict(std::vector<unsigned char>& dict, Communicator<>& comm) {
 
-   std::vector<unsigned char> phrases;
-   // todo: Estimate avg length of phrases based on window_size and p --> change dict to add '0' directly
-   phrases.reserve(dict.size() * 15 * 2);
-   for (auto const& c_vec : dict) {
-       phrases.insert(phrases.end(), c_vec.begin(), c_vec.end());
-       phrases.push_back(DELIMITER);
-   }
-
-   dict.clear();
-   auto result = run_sorter(phrases, comm);
+   auto result = run_sorter(dict, comm);
    return result;
 }
 
@@ -436,7 +428,7 @@ int main(int argc, char const* argv[]) {
   auto parse = compute_dict(splits, data, params, comm);
   timer.stop();
 
-  printSizeHistogram(parse.dict, comm);
+  //printSizeHistogram(parse.dict, comm);
   auto dict_size = comm.allreduce_single(send_buf(parse.dict.size()), kamping::op(kamping::ops::plus<>()));
 
   if (comm.rank_signed() == 0) {
@@ -461,10 +453,7 @@ int main(int argc, char const* argv[]) {
 
   // Swap hashes with lexicographical rank
   timer.synchronize_and_start("Sort hashes");
-
   auto sorted_hashes = sort_hashes(phrase_map, offset, comm);
-  //std::cout << "Min hash on PE " << comm.rank() << " is " << sorted_hashes.begin()->first << " with rank " << sorted_hashes.begin()->second + offset << "\n";
-  //std::cout << "Max hash on PE " << comm.rank() << " is " << sorted_hashes.rbegin()->first << " with rank " << sorted_hashes.rbegin()->second + offset << "\n";
   timer.stop();
 
 
