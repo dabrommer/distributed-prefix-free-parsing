@@ -16,8 +16,8 @@
 #include "util/cli_parser.hpp"
 #include "util/logger.hpp"
 
-unsigned char const DELIMITER = 0;
-unsigned char const DOLLAR    = 1;
+constexpr unsigned char DELIMITER = 0;
+constexpr unsigned char DOLLAR    = 1;
 
 struct Parse {
     std::vector<unsigned char> dict;
@@ -167,73 +167,6 @@ Parse compute_dict(
     return Parse{dict, hashes};
 }
 
-std::vector<std::string> sort_dict(std::vector<std::vector<char>> const& dict, Communicator<>& comm) {
-    // Convert vector to phrase_vector
-    phrase_vector       pv(dict);
-    std::vector<char>   phrases;
-    std::vector<size_t> offsets;
-    comm.gatherv(send_buf(pv.phrases), root(0), recv_buf<BufferResizePolicy::resize_to_fit>(phrases));
-    comm.gatherv(send_buf(pv.offsets), root(0), recv_buf<BufferResizePolicy::resize_to_fit>(offsets));
-    if (comm.rank_signed() == 0) {
-        std::vector<std::string> flat_dict;
-        int                      c = 0;
-        for (size_t size: offsets) {
-            flat_dict.emplace_back(phrases.data() + c, size);
-            c += static_cast<int>(size);
-        }
-
-        std::sort(flat_dict.begin(), flat_dict.end());
-        return flat_dict;
-    }
-    return {};
-}
-
-std::vector<int>
-parse_ranks(Parse& parse, std::vector<std::string> const& sorted_dict, Communicator<>& comm, int window_size) {
-    rabin_karp              kr(window_size);
-    std::vector<int>        ranks;
-    std::map<uint64_t, int> hashed_ranks;
-    // request hashes from rank 0
-    if (comm.rank_signed() == 0) {
-        int rank = 0;
-        for (auto const& str: sorted_dict) {
-            hashed_ranks.insert({kr.kr_print(str), rank});
-            ++rank;
-        }
-        for (auto h: parse.hashes) {
-            ranks.push_back(hashed_ranks.at(h));
-        }
-
-        if (comm.size() == 1) {
-            return ranks;
-        }
-    }
-    auto result      = comm.gatherv(send_buf(parse.hashes), root(0), recv_counts_out());
-    auto recv_counts = result.extract_recv_counts();
-    if (comm.rank_signed() == 0) {
-        auto pe_hashes = result.get_recv_buffer();
-        int  offset    = 0;
-        int  rank      = 0;
-        for (auto count: recv_counts) {
-            if (rank == 0) {
-                ++rank;
-                continue;
-            }
-            std::vector<int> pe_ranks;
-            for (int i = 0; i < count; ++i) {
-                pe_ranks.push_back(hashed_ranks.at(pe_hashes[offset + i]));
-            }
-            comm.send(send_buf(pe_ranks), destination(rank));
-            offset += count;
-            ++rank;
-        }
-    } else {
-        comm.recv(recv_buf<BufferResizePolicy::resize_to_fit>(ranks), source(0));
-        return ranks;
-    }
-    return ranks;
-}
-
 std::vector<unsigned char> sort_dict(std::vector<unsigned char>& dict, Communicator<>& comm) {
     auto result = run_sorter(dict, comm);
     return result;
@@ -248,9 +181,9 @@ std::pair<std::vector<Pair>, int> remove_duplicates(std::vector<unsigned char>& 
     std::vector<Pair> sorted_hashes;
     rabin_karp        rk{};
 
-    for (int i = 0; i < phrases.size(); ++i) {
+    for (unsigned char phrase: phrases) {
         // End of phrase
-        if (phrases[i] == DELIMITER) {
+        if (phrase == DELIMITER) {
             if (!first_hash_set) {
                 first_hash     = hash;
                 first_hash_set = true;
@@ -264,7 +197,7 @@ std::pair<std::vector<Pair>, int> remove_duplicates(std::vector<unsigned char>& 
             }
             rk.reset();
         } else {
-            hash = rk.add_char_fingerprint(phrases[i]);
+            hash = rk.add_char_fingerprint(phrase);
         }
     }
 
@@ -283,15 +216,6 @@ std::pair<std::vector<Pair>, int> remove_duplicates(std::vector<unsigned char>& 
 
     return {sorted_hashes, offset};
 }
-
-std::vector<char> read_file(std::string const& filename) {
-    std::ifstream file(filename, std::ios::binary);
-
-    std::vector<char> buffer((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
-    buffer.insert(buffer.begin(), '0');
-    return buffer;
-}
-
 
 MPI_Datatype create_pair_type() {
     MPI_Datatype pair_type;
@@ -347,8 +271,6 @@ int main(int argc, char const* argv[]) {
     kamping::Environment  env;
     kamping::Communicator comm;
 
-
-
     Params params = read_parameters(argc, argv);
 
     std::string out_name = params.input_path + "_n_" + std::to_string(comm.size()) + "_w_"
@@ -369,11 +291,8 @@ int main(int argc, char const* argv[]) {
 
     auto total_splits = comm.allreduce_single(send_buf(splits.size()), kamping::op(kamping::ops::plus<>()));
 
-    std::string to_print = std::format(
-        "{:.2f} % of the splits ({}) \n",
-        (100.0 * splits.size()) / total_splits,
-        splits.size()
-    );
+    std::string to_print =
+        std::format("{:.2f} % of the splits ({}) \n", (100.0 * splits.size()) / total_splits, splits.size());
     printer.print_all_on_root(to_print, comm);
     comm.barrier();
     // Compute phrases
@@ -385,13 +304,14 @@ int main(int argc, char const* argv[]) {
 
     auto dict_size = comm.allreduce_single(send_buf(parse.dict.size()), kamping::op(kamping::ops::plus<>()));
 
-
-    printer.print_on_root(std::format(
-        "Dict size is {:.2f}% of the total input size \n",
-        (100.0 * dict_size * params.window_size) / data.size()), comm
+    printer.print_on_root(
+        std::format(
+            "Dict size is {:.2f}% of the total input size \n",
+            (100.0 * dict_size * params.window_size) / data.size()
+        ),
+        comm
     );
     printer.print_on_root(std::format("Total dictionary size is {} phrases \n", dict_size), comm);
-
 
     // Sort phrases globally
     timer.synchronize_and_start("Global sort");
