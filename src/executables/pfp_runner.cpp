@@ -1,6 +1,5 @@
 #include "../../external/scalable-distributed-string-sorting/src/executables/sort_caller.cpp"
 #include <iostream>
-#include <print>
 #include <ranges>
 #include <vector>
 
@@ -15,6 +14,7 @@
 #include "kamping/p2p/sendrecv.hpp"
 #include "mpi/data_distribution.hpp"
 #include "util/cli_parser.hpp"
+#include "util/logger.hpp"
 
 unsigned char const DELIMITER = 0;
 unsigned char const DOLLAR    = 1;
@@ -292,56 +292,6 @@ std::vector<char> read_file(std::string const& filename) {
     return buffer;
 }
 
-void printSizeHistogram(std::vector<std::vector<char>> const& data, Communicator<>& comm) {
-    std::map<std::size_t, std::size_t> counts;
-
-    // Count sizes
-    for (auto const& inner: data) {
-        ++counts[inner.size()];
-    }
-
-    // Print JSON
-    std::string out("{\n");
-
-    for (auto it = counts.begin(); it != counts.end(); ++it) {
-        out += ("  \"" + std::to_string(it->first) + "\": " + std::to_string(it->second));
-        if (std::next(it) != counts.end())
-            out += ",";
-    }
-
-    out += "}\n";
-
-    std::vector<char> out_vec(out.begin(), out.end());
-
-    auto outs = comm.gatherv(send_buf(out_vec), recv_counts_out());
-
-    auto offsets = outs.extract_recv_counts();
-    auto strings = outs.get_recv_buffer();
-    int  rank    = 0;
-    for (auto o: offsets) {
-        std::string result(strings.begin(), strings.begin() + o);
-        strings.erase(strings.begin(), strings.begin() + o);
-        std::print("PE {}: \n", rank);
-        std::print("{}\n", result);
-        ++rank;
-    }
-}
-
-void printOnRoot(std::string const& to_print, Communicator<>& comm) {
-    std::vector<char> out_vec(to_print.begin(), to_print.end());
-
-    auto outs = comm.gatherv(send_buf(out_vec), recv_counts_out());
-
-    auto offsets = outs.extract_recv_counts();
-    auto strings = outs.get_recv_buffer();
-    int  rank    = 0;
-    for (auto o: offsets) {
-        std::string result(strings.begin(), strings.begin() + o);
-        strings.erase(strings.begin(), strings.begin() + o);
-        std::print("{}\n", result);
-        ++rank;
-    }
-}
 
 MPI_Datatype create_pair_type() {
     MPI_Datatype pair_type;
@@ -384,7 +334,6 @@ bool check_sort(std::vector<unsigned char> const& to_check) {
         if (c == DELIMITER) {
             int check = curr.compare(prev);
             if (check < 0) {
-                std::print("Error: {} is smaller than {} \n", curr, prev);
                 return false;
             }
             prev = curr;
@@ -398,12 +347,13 @@ int main(int argc, char const* argv[]) {
     kamping::Environment  env;
     kamping::Communicator comm;
 
+
+
     Params params = read_parameters(argc, argv);
 
     std::string out_name = params.input_path + "_n_" + std::to_string(comm.size()) + "_w_"
                            + std::to_string(params.window_size) + "_p_" + std::to_string(params.p_mod) + ".txt";
-    // FILE* fp = std::freopen(out_name.c_str(), "w", stdout); // redirect stdout
-    // if (!fp) return 1;
+    logs::printer printer(out_name);
 
     auto& timer = kamping::measurements::timer();
 
@@ -420,29 +370,28 @@ int main(int argc, char const* argv[]) {
     auto total_splits = comm.allreduce_single(send_buf(splits.size()), kamping::op(kamping::ops::plus<>()));
 
     std::string to_print = std::format(
-        "PE {} has {:.2f} % of the splits ({}) \n",
-        comm.rank(),
+        "{:.2f} % of the splits ({}) \n",
         (100.0 * splits.size()) / total_splits,
         splits.size()
     );
-    printOnRoot(to_print, comm);
+    printer.print_all_on_root(to_print, comm);
     comm.barrier();
     // Compute phrases
     timer.synchronize_and_start("Compute dict");
     auto parse = compute_dict(splits, data, params, comm);
     timer.stop();
 
-    // printSizeHistogram(parse.dict, comm);
+    printer.log_phrase_size(parse.dict, comm, DELIMITER);
+
     auto dict_size = comm.allreduce_single(send_buf(parse.dict.size()), kamping::op(kamping::ops::plus<>()));
 
-    if (comm.rank_signed() == 0) {
-        std::print(
-            "Dict size is {:.2f}% of the total input size \n",
-            (100.0 * dict_size * params.window_size) / data.size()
-        );
-        std::print("Total dictionary size is {} phrases \n", dict_size);
-    }
-    comm.barrier();
+
+    printer.print_on_root(std::format(
+        "Dict size is {:.2f}% of the total input size \n",
+        (100.0 * dict_size * params.window_size) / data.size()), comm
+    );
+    printer.print_on_root(std::format("Total dictionary size is {} phrases \n", dict_size), comm);
+
 
     // Sort phrases globally
     timer.synchronize_and_start("Global sort");
@@ -450,7 +399,7 @@ int main(int argc, char const* argv[]) {
     timer.stop();
 
     bool check = check_sort(sorted_dict);
-    printOnRoot(std::to_string(check), comm);
+    printer.print_on_root(std::to_string(check), comm);
 
     // Remove duplicates and hash sorted phrases
     timer.synchronize_and_start("Remove duplicates");
@@ -463,5 +412,4 @@ int main(int argc, char const* argv[]) {
     timer.stop();
 
     timer.aggregate_and_print(kamping::measurements::SimpleJsonPrinter<>(std::cout));
-    // std::fclose(fp);
 }
