@@ -4,6 +4,7 @@
 #include <vector>
 
 #include "AmsSort/AmsSort.hpp"
+#include "checks/check_parsing.hpp"
 #include "hash/rabin-karp.hpp"
 #include "kamping/collectives/allreduce.hpp"
 #include "kamping/collectives/gather.hpp"
@@ -55,6 +56,10 @@ std::vector<int> compute_splitters(std::vector<char>& data, Communicator<>& comm
     std::vector<int> splits;
     for (int i = 0; i < data.size(); i++) {
         uint64_t hash = rk.add_char(data[i]);
+
+        if (data[i] == DOLLAR || data[i] == DELIMITER) {
+            std::cout << "Found char " << data[i] << " in data at position " << i << " on PE " << comm.rank_signed() << "\n";
+        }
 
         // Make sure the window is filled
         if (i < params.window_size) {
@@ -378,6 +383,7 @@ int main(int argc, char const* argv[]) {
 
     // Sort phrases globally
     timer.synchronize_and_start("Global sort");
+    std::vector<unsigned char> dict_store = parse.dict;
     auto sorted_dict = sort_dict(parse.dict, comm);
     timer.stop();
 
@@ -398,6 +404,11 @@ int main(int argc, char const* argv[]) {
     timer.synchronize_and_start("Exchange hashes");
     auto final_ranks = exchange_hashes(hashes, parse.hashes, last_hash, comm);
     timer.stop();
+
+    if (comm.is_root()) {
+        check = check_parsing(final_ranks, params, dict_store, comm, DELIMITER);
+        printer.print_on_root(std::format("Parsing is correct: {} \n", check), comm);
+    }
 
     timer.aggregate_and_print(kamping::measurements::SimpleJsonPrinter<>(std::cout));
 }
