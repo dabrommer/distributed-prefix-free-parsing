@@ -20,9 +20,6 @@ struct printer {
         }
     }
 
-    std::ostream get_ostream() {
-        return std::ostream(file);
-    }
     void
     log_phrase_size(std::vector<unsigned char> const& data, Communicator<> const& comm, char const delimiter) const {
         std::map<std::size_t, std::size_t> counts;

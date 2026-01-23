@@ -29,7 +29,6 @@ struct Pair {
     int      value;
 
     Pair(uint64_t key, int value) : key(key), value(value) {}
-
     Pair() = default;
 };
 
@@ -233,7 +232,8 @@ MPI_Datatype create_pair_type() {
     return pair_type;
 }
 
-std::map<uint64_t, int> sort_hashes(std::vector<Pair>& hash_vec, int offset, Communicator<>& comm) {
+std::pair<std::unordered_map<uint64_t, int>, uint64_t>
+sort_hashes(std::vector<Pair>& hash_vec, int offset, Communicator<>& comm) {
     int const kway      = 64;
     auto      pair_comp = [](Pair const& a, Pair const& b) {
         return a.key < b.key;
@@ -242,11 +242,11 @@ std::map<uint64_t, int> sort_hashes(std::vector<Pair>& hash_vec, int offset, Com
     std::mt19937_64    gen(rd());
 
     Ams::sort(create_pair_type(), hash_vec, kway, gen, comm.mpi_communicator(), pair_comp);
-    std::map<uint64_t, int> sorted_map;
+    std::unordered_map<uint64_t, int> map;
     for (auto const& p: hash_vec) {
-        sorted_map.insert({p.key, p.value});
+        map.insert({p.key, p.value});
     }
-    return sorted_map;
+    return {map, hash_vec.back().key};
 }
 
 bool check_sort(std::vector<unsigned char> const& to_check) {
@@ -267,6 +267,69 @@ bool check_sort(std::vector<unsigned char> const& to_check) {
     return true;
 }
 
+std::vector<int> exchange_hashes(
+    std::unordered_map<uint64_t, int>& hash_vec,
+    std::vector<uint64_t> const&       hashes,
+    uint64_t                           last_hash,
+    Communicator<> const&              comm
+) {
+    auto                               border_hashes = comm.allgather(send_buf(last_hash));
+    std::vector<std::vector<uint64_t>> hashes_to_request(comm.size());
+    std::vector<int>                   pe_order;
+    for (auto const& h: hashes) {
+        auto const it = std::ranges::lower_bound(border_hashes, h);
+        auto const pe = std::distance(border_hashes.begin(), it);
+        hashes_to_request[pe].push_back(h);
+        pe_order.push_back(pe);
+    }
+    // Compute size_v for alltoallv
+    std::vector<int> size_v;
+    for (auto const& vec: hashes_to_request) {
+        size_v.push_back(vec.size());
+    }
+    // Flatten the request vector
+    auto                  flat_requests = hashes_to_request | std::views::join;
+    std::vector<uint64_t> flat_hashes(flat_requests.begin(), flat_requests.end());
+
+    auto requests = comm.alltoallv(send_buf(flat_hashes), send_counts(size_v), recv_counts_out());
+
+    auto const recv_counts = requests.extract_recv_counts();
+    auto const recv_buf    = requests.get_recv_buffer();
+
+    int              rank  = 0;
+    int              count = 0;
+    std::vector<int> responses;
+    std::vector<int> response_size_v;
+    for (auto const& hash: recv_buf) {
+        responses.push_back(hash_vec[hash]);
+        if (count == recv_counts[rank]) {
+            ++rank;
+            response_size_v.push_back(count);
+            count = 0;
+            continue;
+        }
+        ++count;
+    }
+    response_size_v.push_back(count);
+    // Send back the responses
+    auto             result = comm.alltoallv(send_buf(responses), send_counts(response_size_v));
+    std::vector<int> offsets(comm.size());
+    int              off = 0;
+    for (auto& offset: hashes_to_request) {
+        offsets.push_back(off + offset.size());
+        off += offset.size();
+    }
+    std::vector<int> final_ranks;
+    final_ranks.reserve(pe_order.size());
+    for (auto i: pe_order) {
+        int curr_rank = result[offsets[i]];
+        final_ranks.push_back(curr_rank);
+        offsets[i]++;
+    }
+
+    return final_ranks;
+}
+
 int main(int argc, char const* argv[]) {
     kamping::Environment  env;
     kamping::Communicator comm;
@@ -275,7 +338,7 @@ int main(int argc, char const* argv[]) {
 
     std::string out_name = params.input_path + "_n_" + std::to_string(comm.size()) + "_w_"
                            + std::to_string(params.window_size) + "_p_" + std::to_string(params.p_mod) + ".txt";
-    logs::printer printer(out_name);
+    logs::printer printer{};
 
     auto& timer = kamping::measurements::timer();
 
@@ -300,9 +363,9 @@ int main(int argc, char const* argv[]) {
     auto parse = compute_dict(splits, data, params, comm);
     timer.stop();
 
-    printer.log_phrase_size(parse.dict, comm, DELIMITER);
+    // printer.log_phrase_size(parse.dict, comm, DELIMITER);
 
-    auto dict_size = comm.allreduce_single(send_buf(parse.dict.size()), kamping::op(kamping::ops::plus<>()));
+    auto dict_size = comm.allreduce_single(send_buf(parse.hashes.size()), kamping::op(kamping::ops::plus<>()));
 
     printer.print_on_root(
         std::format(
@@ -326,9 +389,14 @@ int main(int argc, char const* argv[]) {
     auto [phrase_map, offset] = remove_duplicates(sorted_dict, comm);
     timer.stop();
 
-    // Swap hashes with lexicographical rank
+    // Globally sort hashes
     timer.synchronize_and_start("Sort hashes");
-    auto sorted_hashes = sort_hashes(phrase_map, offset, comm);
+    auto [hashes, last_hash] = sort_hashes(phrase_map, offset, comm);
+    timer.stop();
+
+    // Exchange hashes
+    timer.synchronize_and_start("Exchange hashes");
+    auto final_ranks = exchange_hashes(hashes, parse.hashes, last_hash, comm);
     timer.stop();
 
     timer.aggregate_and_print(kamping::measurements::SimpleJsonPrinter<>(std::cout));
