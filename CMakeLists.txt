@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.30)
+cmake_minimum_required(VERSION 3.26)
 project(PFP)
 
 set(CMAKE_CXX_STANDARD 23)
@@ -42,7 +42,7 @@ add_subdirectory(external/scalable-distributed-string-sorting)
 FetchContent_Declare(
         kadis
         GIT_REPOSITORY https://github.com/MichaelAxtmann/KaDiS.git
-        GIT_BRANCH main
+        GIT_TAG ac9c5755d325d1d373a188e6fc0733b12205a74d
 )
 
 FetchContent_Declare(
