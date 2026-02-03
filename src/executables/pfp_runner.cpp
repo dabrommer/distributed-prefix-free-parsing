@@ -443,7 +443,7 @@ int main(int argc, char const* argv[]) {
     auto final_ranks = exchange_hashes(hashes, parse.hashes, last_hash, comm);
     timer.stop();
 
-    if (comm.is_root()) {
+    if (comm.size() == 1 && comm.is_root()) {
         check = check_parsing(final_ranks, params, sorted_dict, comm, DELIMITER);
         printer.print_on_root(std::format("Parsing is correct: {} \n", check), comm);
     }
