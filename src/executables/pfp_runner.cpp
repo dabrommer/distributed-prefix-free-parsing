@@ -406,6 +406,10 @@ int main(int argc, char const* argv[]) {
     auto parse = compute_dict(splits, data, params, comm);
     timer.stop();
 
+    // Cleanup
+    splits.clear();
+    data.clear();
+
     // printer.log_phrase_size(parse.dict, comm, DELIMITER);
 
     auto dict_size = comm.allreduce_single(send_buf(parse.hashes.size()), kamping::op(kamping::ops::plus<>()));
@@ -437,6 +441,9 @@ int main(int argc, char const* argv[]) {
     timer.synchronize_and_start("Sort hashes");
     auto [hashes, last_hash] = sort_hashes(phrase_map, offset, comm);
     timer.stop();
+
+    // Cleanup
+    phrase_map.clear();
 
     // Exchange hashes
     timer.synchronize_and_start("Exchange hashes");
