@@ -204,9 +204,8 @@ std::pair<std::vector<Pair>, size_t> remove_duplicates(std::vector<unsigned char
     int               rank           = 0;
     std::vector<Pair> sorted_hashes;
     rabin_karp        rk{window_size};
-    std::string prev_str;
-    std::string curr_str;
     std::vector<unsigned char> curr_phrase;
+    std::vector<unsigned char> unique_phrases;
 
     for (const unsigned char c: phrases) {
         // End of phrase
@@ -220,23 +219,32 @@ std::pair<std::vector<Pair>, size_t> remove_duplicates(std::vector<unsigned char
                 prev_hash      = hash;
                 sorted_hashes.emplace_back(hash, rank);
                 ++rank;
+                unique_phrases.insert(
+                    unique_phrases.end(),
+                    curr_phrase.begin(),
+                    curr_phrase.end()
+                );
+                unique_phrases.push_back(DELIMITER);
             } else if (hash != prev_hash) {
                 sorted_hashes.emplace_back(hash, rank);
                 prev_hash = hash;
                 ++rank;
+                unique_phrases.insert(
+                    unique_phrases.end(),
+                    curr_phrase.begin(),
+                    curr_phrase.end()
+                );
+                unique_phrases.push_back(DELIMITER);
             }
-
-            prev_str.clear();
-            prev_str.swap(curr_str);
-            curr_str.clear();
             curr_phrase.clear();
             rk.reset();
             hash = 0;
         } else {
-            curr_str.push_back(static_cast<char>(c));
             curr_phrase.push_back(c);
         }
     }
+
+    phrases.swap(unique_phrases);
 
     // Exchange last hashes to remove duplicates across PEs
     // Each PE sends its last hash to the next PE and compares it to its first hash
@@ -416,23 +424,6 @@ int main(int argc, char const* argv[]) {
     auto sorted_dict = sort_dict(parse.dict, comm);
     timer.stop();
 
-    std::vector<std::string> sorted_phrases;
-    if (comm.is_root()) {
-        std::string current_phrase;
-        for (auto c : sorted_dict) {
-            if (c == DELIMITER) {
-                sorted_phrases.push_back(current_phrase);
-                current_phrase.clear();
-            } else {
-                current_phrase.push_back(c);
-            }
-        }
-    }
-    // remove duplicates in sorted dict
-    auto it = std::ranges::unique(sorted_phrases).begin();
-    sorted_phrases.erase(it, sorted_phrases.end());
-
-
     bool check = check_sort(sorted_dict);
     printer.print_on_root(std::to_string(check), comm);
 
@@ -453,7 +444,7 @@ int main(int argc, char const* argv[]) {
     timer.stop();
 
     if (comm.is_root()) {
-        check = check_parsing(final_ranks, params, sorted_phrases, comm);
+        check = check_parsing(final_ranks, params, sorted_dict, comm, DELIMITER);
         printer.print_on_root(std::format("Parsing is correct: {} \n", check), comm);
     }
 
