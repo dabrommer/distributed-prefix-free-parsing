@@ -205,10 +205,15 @@ std::pair<std::vector<Pair>, size_t> remove_duplicates(std::vector<unsigned char
     std::vector<Pair> sorted_hashes;
     rabin_karp        rk{window_size};
     std::vector<unsigned char> curr_phrase;
-    std::vector<unsigned char> unique_phrases;
 
-    for (const unsigned char c: phrases) {
-        // End of phrase
+    // write position for in-place compaction
+    size_t write_pos = 0;
+    size_t read_pos  = 0;
+    const size_t orig_size = phrases.size();
+
+
+    while (read_pos < orig_size) {
+        unsigned char c = phrases[read_pos++];
         if (c == DELIMITER) {
             // Compute hash for the full phrase
             hash = rk.kr_print(curr_phrase);
@@ -219,22 +224,23 @@ std::pair<std::vector<Pair>, size_t> remove_duplicates(std::vector<unsigned char
                 prev_hash      = hash;
                 sorted_hashes.emplace_back(hash, rank);
                 ++rank;
-                unique_phrases.insert(
-                    unique_phrases.end(),
-                    curr_phrase.begin(),
-                    curr_phrase.end()
-                );
-                unique_phrases.push_back(DELIMITER);
+
+                // write kept phrase in-place
+                if (!curr_phrase.empty()) {
+                    std::copy(curr_phrase.begin(), curr_phrase.end(), phrases.begin() + write_pos);
+                    write_pos += curr_phrase.size();
+                }
+                phrases[write_pos++] = DELIMITER;
             } else if (hash != prev_hash) {
                 sorted_hashes.emplace_back(hash, rank);
                 prev_hash = hash;
                 ++rank;
-                unique_phrases.insert(
-                    unique_phrases.end(),
-                    curr_phrase.begin(),
-                    curr_phrase.end()
-                );
-                unique_phrases.push_back(DELIMITER);
+
+                if (!curr_phrase.empty()) {
+                    std::copy(curr_phrase.begin(), curr_phrase.end(), phrases.begin() + write_pos);
+                    write_pos += curr_phrase.size();
+                }
+                phrases[write_pos++] = DELIMITER;
             }
             curr_phrase.clear();
             rk.reset();
@@ -244,7 +250,8 @@ std::pair<std::vector<Pair>, size_t> remove_duplicates(std::vector<unsigned char
         }
     }
 
-    phrases.swap(unique_phrases);
+    // Resize phrases to the new compacted size
+    phrases.resize(write_pos);
 
     // Exchange last hashes to remove duplicates across PEs
     // Each PE sends its last hash to the next PE and compares it to its first hash
@@ -397,9 +404,9 @@ int main(int argc, char const* argv[]) {
 
     auto total_splits = comm.allreduce_single(send_buf(splits.size()), kamping::op(kamping::ops::plus<>()));
 
-    std::string to_print =
-        std::format("{:.2f} % of the splits ({}) \n", (100.0 * splits.size()) / total_splits, splits.size());
-    printer.print_all_on_root(to_print, comm);
+    //std::string to_print =
+    //    std::format("{:.2f} % of the splits ({}) \n", (100.0 * splits.size()) / total_splits, splits.size());
+    //printer.print_all_on_root(to_print, comm);
     comm.barrier();
     // Compute phrases
     timer.synchronize_and_start("Compute dict");
@@ -409,19 +416,6 @@ int main(int argc, char const* argv[]) {
     // Cleanup
     splits.clear();
     data.clear();
-
-    // printer.log_phrase_size(parse.dict, comm, DELIMITER);
-
-    auto dict_size = comm.allreduce_single(send_buf(parse.hashes.size()), kamping::op(kamping::ops::plus<>()));
-
-    printer.print_on_root(
-        std::format(
-            "Dict size is {:.2f}% of the total input size \n",
-            (100.0 * dict_size * params.window_size) / data.size()
-        ),
-        comm
-    );
-    printer.print_on_root(std::format("Total dictionary size is {} phrases \n", dict_size), comm);
 
     // Sort phrases globally
     timer.synchronize_and_start("Global sort");
