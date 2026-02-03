@@ -9,8 +9,7 @@ struct rabin_karp {
     int*           window;
     int            alphabet_size = 256;
     uint64_t       hash          = 0;
-    uint64_t const prime         = 1999999973;
-    uint64_t const hash_prime    = 3355443229;
+    uint64_t const prime         = 27162335252586509;
     uint64_t       num_chars     = 0;
     uint64_t       alphabet_pot;
 
@@ -54,7 +53,7 @@ struct rabin_karp {
     }
 
     uint64_t add_char_fingerprint(unsigned char c) {
-        hash = (256 * hash + c) % hash_prime;
+        hash = (256 * hash + c) % prime;
         return hash;
     }
 
@@ -65,7 +64,7 @@ struct rabin_karp {
         // const uint64_t prime = 1999999973; //27162335252586509; // next prime (2**54 + 2**53 + 2**47 + 2**13)
         for (auto c: phrase) {
             // assert(c>=0 && c< 256);
-            loc_hash = (256 * loc_hash + c) % hash_prime; //  add char k
+            loc_hash = (256 * loc_hash + c) % prime; //  add char k
         }
         return loc_hash;
     }

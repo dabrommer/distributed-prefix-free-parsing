@@ -6,41 +6,61 @@
 #include "kamping/communicator.hpp"
 #include "util/cli_parser.hpp"
 
-bool check_parsing(std::vector<int> const& ranks, Params const& params, std::vector<unsigned char> const& dict, kamping::Communicator<>& comm, char DELIMITER) {
+inline bool check_parsing(std::vector<int> const& ranks, Params const& params, std::vector<std::string> const& phrases, kamping::Communicator<>& comm) {
 
     std::ifstream file(params.input_path, std::ios::binary);
-    std::vector<char> file_data(
-            (std::istreambuf_iterator<char>(file)),
-            std::istreambuf_iterator<char>()
-    );
-
-    std::vector<std::string> phrases;
-    std::string current_phrase;
-    for (auto c : dict) {
-        if (c == DELIMITER) {
-            phrases.push_back(current_phrase);
-            current_phrase.clear();
-        } else {
-            current_phrase.push_back(c);
-        }
+    if (!file) {
+        std::cerr << "Failed to open input file '" << params.input_path << "' for checking\n";
+        return false;
     }
+    std::vector<char> file_data((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
 
+    std::size_t matches = 0;
+    std::size_t missmatches = 0;
     bool correct = true;
-    int index = 0;
-    for (int rank : ranks) {
+    std::size_t index = 0;
+    bool first_phrase = true;
 
-        std::string& expected_phrase = phrases[rank];
-        if (rank == 0) {
-            expected_phrase.erase(0,1); // Remove leading $
+    for (int rank : ranks) {
+        if (rank < 0 || static_cast<std::size_t>(rank) >= phrases.size()) {
+            std::cerr << "check_parsing: invalid rank " << rank << " (phrases size=" << phrases.size() << ")\n";
+            return false;
         }
-        int          size            = expected_phrase.size() - params.window_size;
-        for (int j = index; j < index + size; ++j) {
-            auto expected = file_data[j];
-            auto is = expected_phrase[j - index];
-            correct = file_data[j] == expected_phrase[j - index];
+
+        std::string expected_phrase = phrases[static_cast<std::size_t>(rank)];
+
+        if (first_phrase) {
+            if (!expected_phrase.empty()) {
+                expected_phrase.erase(0, 1);
+            }
+            first_phrase = false;
         }
-        index += size;
+
+        std::ptrdiff_t comp_len = static_cast<std::ptrdiff_t>(expected_phrase.size()) - static_cast<std::ptrdiff_t>(params.window_size);
+        if (comp_len <= 0) {
+            // Nothing to compare for this phrase
+            continue;
+        }
+
+        if (index + static_cast<std::size_t>(comp_len) > file_data.size()) {
+            std::cerr << "check_parsing: file buffer too small for reconstructed phrases (needed " << (index + comp_len)
+                      << ", have " << file_data.size() << ")\n";
+            return false;
+        }
+
+        for (std::ptrdiff_t k = 0; k < comp_len; ++k) {
+            char expected_c = expected_phrase[static_cast<std::size_t>(k)];
+            char file_c = file_data[index];
+            if (file_c == expected_c) {
+                ++matches;
+            } else {
+                ++missmatches;
+                correct = false;
+            }
+            ++index;
+        }
     }
+
+    std::cout << "Total matches: " << matches << ", total mismatches: " << missmatches << "\n";
     return correct;
 }
-
