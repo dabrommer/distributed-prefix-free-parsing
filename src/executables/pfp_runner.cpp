@@ -388,7 +388,7 @@ int main(int argc, char const* argv[]) {
 
     std::string out_name = params.input_path + "_n_" + std::to_string(comm.size()) + "_w_"
                            + std::to_string(params.window_size) + "_p_" + std::to_string(params.p_mod) + ".txt";
-    logs::printer printer{};
+    logs::printer printer(out_name);
 
     auto& timer = kamping::measurements::timer();
 
@@ -449,5 +449,12 @@ int main(int argc, char const* argv[]) {
         printer.print_on_root(std::format("Parsing is correct: {} \n", check), comm);
     }
 
-    timer.aggregate_and_print(kamping::measurements::SimpleJsonPrinter<>(std::cout));
+    int max_rank = std::max(final_ranks.front(), final_ranks.back());
+
+    if (params.verbose) {
+        printer.print_on_root(std::format("Max Rank: {} \n", max_rank), comm);
+        printer.print_rank_distribution(final_ranks, comm);
+    }
+
+    timer.aggregate_and_print(kamping::measurements::SimpleJsonPrinter<>(printer.get_ostream()));
 }

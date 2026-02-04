@@ -9,6 +9,7 @@ struct Params {
     int         window_size = 10;
     std::string hash;
     int         p_mod = 100;
+    bool verbose = false;
 };
 
 Params read_parameters(int argc, char const* argv[]) {
@@ -19,6 +20,7 @@ Params read_parameters(int argc, char const* argv[]) {
     app.add_option("--w", params.window_size, "Window size");
     app.add_option("--hash", params.hash, "Hash function to use");
     app.add_option("--p", params.p_mod, "Modulo for hash splitters");
+    app.add_option("--verbose", params.verbose, "Verbose output");
 
     CLI11_PARSE_MPI(app, argc, argv);
 
