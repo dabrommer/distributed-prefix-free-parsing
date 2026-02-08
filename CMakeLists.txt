@@ -41,8 +41,8 @@ add_subdirectory(external/scalable-distributed-string-sorting)
 
 FetchContent_Declare(
         kadis
-        GIT_REPOSITORY https://github.com/MichaelAxtmann/KaDiS.git
-        GIT_TAG ac9c5755d325d1d373a188e6fc0733b12205a74d
+        GIT_REPOSITORY https://github.com/mschimek/KaDiS.git
+        GIT_TAG 9141c628202e92aa342fd7e103c3350773aa746a
 )
 
 FetchContent_Declare(
