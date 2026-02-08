@@ -16,10 +16,9 @@ Params read_parameters(int argc, char const* argv[]) {
     CLI::App app{"Prefix Free Parsing"};
 
     Params params;
-    app.add_option("--input", params.input_path, "Path to input file");
-    app.add_option("--w", params.window_size, "Window size");
-    app.add_option("--hash", params.hash, "Hash function to use");
-    app.add_option("--p", params.p_mod, "Modulo for hash splitters");
+    app.add_option("--input", params.input_path, "Path to input file")->required();
+    app.add_option("-w", params.window_size, "Window size");
+    app.add_option("-p", params.p_mod, "Modulo for hash splitters");
     app.add_option("--verbose", params.verbose, "Verbose output");
 
     CLI11_PARSE_MPI(app, argc, argv);
