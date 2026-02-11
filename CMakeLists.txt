@@ -65,11 +65,16 @@ target_link_libraries(base PUBLIC kamping::kamping kadis CLI11::CLI11)
 
 add_subdirectory(src)
 
+# Set DDCX_lib_DIR to the directory containing DDCX_libConfig.cmake
+find_package(DDCX_lib REQUIRED)
+
+
 add_executable(PFP src/executables/pfp_runner.cpp)
 
 
 target_link_libraries(PFP PRIVATE base)
 target_link_libraries(PFP PRIVATE sort_caller_lib)
+target_link_libraries(PFP PRIVATE DDCX_lib::DDCX_lib)
 
 
 
