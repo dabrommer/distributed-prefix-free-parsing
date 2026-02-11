@@ -16,6 +16,8 @@
 #include "mpi/data_distribution.hpp"
 #include "util/cli_parser.hpp"
 #include "util/logger.hpp"
+#include "util/dcx_caller.hpp"
+#include "DDCX_lib/dss_interface.hpp"
 
 constexpr unsigned char DELIMITER = 0;
 constexpr unsigned char DOLLAR    = 1;
@@ -306,7 +308,7 @@ sort_hashes(std::vector<Pair>& hash_vec, int offset, Communicator<>& comm) {
 }
 
 
-std::vector<int> exchange_hashes(
+std::vector<uint32_t> exchange_hashes(
     std::unordered_map<uint64_t, int>& hash_vec,
     std::vector<uint64_t> const&       hashes,
     uint64_t                           last_hash,
@@ -369,7 +371,7 @@ std::vector<int> exchange_hashes(
         offsets[peer] = off;
         off += static_cast<int>(hashes_to_request[peer].size());
     }
-    std::vector<int> final_ranks;
+    std::vector<uint32_t> final_ranks;
     final_ranks.reserve(pe_order.size());
     for (auto i: pe_order) {
         int curr_rank = result[offsets[i]];
@@ -456,5 +458,20 @@ int main(int argc, char const* argv[]) {
         printer.print_rank_distribution(final_ranks, comm);
     }
 
+    auto arg_strings = get_dcx_args();
+
+    auto sa_argc = static_cast<int32_t>(arg_strings.size());
+    char const* sa_argv[sa_argc];
+
+    for (int i = 0; i < sa_argc; ++i) {
+        sa_argv[i] = arg_strings[i].c_str();
+    }
+
+    timer.synchronize_and_start("Compute SA of P");
+    auto values = get_sa(final_ranks, comm, sa_argc, sa_argv);
+    timer.stop();
+
     timer.aggregate_and_print(kamping::measurements::SimpleJsonPrinter<>(printer.get_ostream()));
+     return 0;
+
 }

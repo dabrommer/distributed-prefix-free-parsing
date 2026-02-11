@@ -97,7 +97,7 @@ struct printer {
         }
     }
 
-    void print_rank_distribution(const std::vector<int>& ranks, const Communicator<>& comm) {
+    void print_rank_distribution(const std::vector<uint32_t>& ranks, const Communicator<>& comm) {
         if (!comm.is_root()) {
             return;
         }

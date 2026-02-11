@@ -6,7 +6,7 @@
 #include "kamping/communicator.hpp"
 #include "util/cli_parser.hpp"
 
-inline bool check_parsing(std::vector<int> const& ranks, Params const& params, std::vector<unsigned char> const& phrases, kamping::Communicator<>& comm, unsigned char DELIMITER) {
+inline bool check_parsing(std::vector<uint32_t> const& ranks, Params const& params, std::vector<unsigned char> const& phrases, kamping::Communicator<>& comm, unsigned char DELIMITER) {
 
 
     std::ifstream file(params.input_path, std::ios::binary);
