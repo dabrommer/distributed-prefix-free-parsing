@@ -198,7 +198,7 @@ std::vector<unsigned char> sort_dict(std::vector<unsigned char>& dict, Communica
     return result;
 }
 
-std::pair<std::vector<Pair>, size_t> remove_duplicates(std::vector<unsigned char>& phrases, Communicator<>& comm, int window_size) {
+std::vector<Pair> remove_duplicates(std::vector<unsigned char>& phrases, Communicator<>& comm, int window_size) {
     uint64_t          first_hash     = 0;
     bool              first_hash_set = false;
     uint64_t          prev_hash      = 0;
@@ -268,9 +268,15 @@ std::pair<std::vector<Pair>, size_t> remove_duplicates(std::vector<unsigned char
 
     // Compute offset for global ranks
     auto  size   = sorted_hashes.size();
-    auto offset = comm.exscan_single(send_buf(size), op(kamping::ops::plus<>()));
+    auto offset = static_cast<int>(comm.exscan_single(send_buf(size), op(kamping::ops::plus<>())));
 
-    return {sorted_hashes, offset};
+    if (offset != 0) {
+        // Update local ranks to global ranks
+        for (auto& p: sorted_hashes) {
+            p.rank += offset;
+        }
+    }
+    return sorted_hashes;
 }
 
 MPI_Datatype create_pair_type() {
@@ -290,7 +296,7 @@ MPI_Datatype create_pair_type() {
 }
 
 std::pair<std::unordered_map<uint64_t, int>, uint64_t>
-sort_hashes(std::vector<Pair>& hash_vec, int offset, Communicator<>& comm) {
+sort_hashes(std::vector<Pair>& hash_vec, Communicator<>& comm) {
     int const kway      = 64;
     auto      pair_comp = [](Pair const& a, Pair const& b) {
         return a.hash < b.hash;
@@ -359,10 +365,8 @@ std::vector<uint32_t> exchange_hashes(
         }
     }
 
-    // The number of responses to send back to each rank is exactly the counts we received from them.
-    std::vector<int> response_size_v = recv_counts;
-    // Send back the responses
-    auto             result = comm.alltoallv(send_buf(responses), send_counts(response_size_v));
+    // Send back the responses; The number of responses to send back to each rank is exactly the counts we received from them.
+    auto             result = comm.alltoallv(send_buf(responses), send_counts(recv_counts));
 
     // Compute starting offsets into the flattened requests vector for each peer
     std::vector<int> offsets(comm.size());
@@ -429,13 +433,13 @@ int main(int argc, char const* argv[]) {
 
     // Remove duplicates and hash sorted phrases
     timer.synchronize_and_start("Remove duplicates");
-    auto [phrase_map, offset] = remove_duplicates(sorted_dict, comm, params.window_size);
+    auto phrase_map = remove_duplicates(sorted_dict, comm, params.window_size);
     timer.stop();
 
 
     // Globally sort hashes
     timer.synchronize_and_start("Sort hashes");
-    auto [hashes, last_hash] = sort_hashes(phrase_map, offset, comm);
+    auto [hashes, last_hash] = sort_hashes(phrase_map, comm);
     timer.stop();
 
     // Cleanup
@@ -472,6 +476,6 @@ int main(int argc, char const* argv[]) {
     timer.stop();
 
     timer.aggregate_and_print(kamping::measurements::SimpleJsonPrinter<>(printer.get_ostream()));
-     return 0;
+    return 0;
 
 }
