@@ -26,22 +26,32 @@ std::vector<char> open_file(std::string const& input_path, int window_size, Comm
     MPI_Offset file_size;
     MPI_File_get_size(input_file, &file_size);
 
-    size_t   local_slice_size = file_size / comm.size();
-    uint64_t larger_slices    = file_size % comm.size();
+    int comm_size = static_cast<int>(comm.size());
+    int comm_rank = static_cast<int>(comm.rank_signed());
 
-    size_t offset;
+    MPI_Offset local_slice_size = file_size / comm_size;
+    MPI_Offset larger_slices    = file_size % comm_size;
+
+    MPI_Offset offset;
     if (comm.rank() < larger_slices) {
         ++local_slice_size;
-        offset = local_slice_size * comm.rank();
+        offset = local_slice_size * comm_rank;
     } else {
         offset = larger_slices * (local_slice_size + 1);
-        offset += (comm.rank() - larger_slices) * local_slice_size;
+        offset += (comm_rank - larger_slices) * local_slice_size;
     }
 
     MPI_File_seek(input_file, offset, MPI_SEEK_SET);
 
-    std::vector<char> data(local_slice_size);
-    MPI_File_read(input_file, data.data(), local_slice_size + window_size, MPI_CHAR, MPI_STATUS_IGNORE);
+    int read_count;
+    if (comm.rank() == comm.size() - 1) {
+        read_count = static_cast<int>(local_slice_size);
+    } else {
+        read_count = static_cast<int>(local_slice_size + window_size);
+    }
+
+    std::vector<char> data(read_count);
+    MPI_File_read(input_file, data.data(), read_count, MPI_CHAR, MPI_STATUS_IGNORE);
 
     return data;
 }
