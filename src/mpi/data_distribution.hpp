@@ -47,7 +47,7 @@ std::vector<char> open_file(std::string const& input_path, int window_size, Comm
     if (comm.rank() == comm.size() - 1) {
         read_count = static_cast<int>(local_slice_size);
     } else {
-        read_count = static_cast<int>(local_slice_size + window_size);
+        read_count = static_cast<int>(local_slice_size + window_size - 1);
     }
 
     std::vector<char> data(read_count);
