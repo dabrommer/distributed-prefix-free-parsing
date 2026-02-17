@@ -72,12 +72,13 @@ inline bool check_parsing(std::vector<uint32_t> const& ranks, Params const& para
     bool first_phrase = true;
 
     for (int rank : ranks_complete) {
-        if (rank < 0 || static_cast<std::size_t>(rank) >= all_phrases.size()) {
+        // Rank is 1-based
+        if (rank < 1 || static_cast<std::size_t>(rank - 1) >= all_phrases.size()) {
             std::cerr << "check_parsing: invalid rank " << rank << " (phrases size=" << all_phrases.size() << ")\n";
             return false;
         }
 
-        std::string expected_phrase = all_phrases[static_cast<std::size_t>(rank)];
+        std::string expected_phrase = all_phrases[static_cast<std::size_t>(rank - 1)];
 
         // Erase leading # from the frist phrase
         if (first_phrase) {

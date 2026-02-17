@@ -181,7 +181,8 @@ std::vector<Pair> remove_duplicates(std::vector<unsigned char>& phrases, Communi
     // todo what if the first hash == 0?
     uint64_t          prev_hash      = 0;
     uint64_t          hash           = 0;
-    int               rank           = 0;
+    // 1-based ranks are needed (dcx has 0 reserved)
+    int               rank           = 1;
     std::vector<Pair> sorted_hashes;
     rabin_karp        rk{window_size};
     std::vector<unsigned char> curr_phrase;
@@ -470,10 +471,6 @@ int main(int argc, char const* argv[]) {
 
     for (int i = 0; i < sa_argc; ++i) {
         sa_argv[i] = arg_strings[i].c_str();
-    }
-
-    for (auto& v : final_ranks) {
-        v++;
     }
 
     timer.synchronize_and_start("Compute SA of P");
