@@ -17,6 +17,7 @@
 #include "util/cli_parser.hpp"
 #include "util/logger.hpp"
 #include "util/dcx_caller.hpp"
+#include "util/pair.hpp"
 #include "DDCX_lib/dss_interface.hpp"
 
 constexpr unsigned char DELIMITER = 0;
@@ -25,14 +26,6 @@ constexpr unsigned char DOLLAR    = 1;
 struct Parse {
     std::vector<unsigned char> dict;
     std::vector<uint64_t>      hashes;
-};
-
-struct Pair {
-    uint64_t hash;
-    int      rank;
-
-    Pair(uint64_t key, int value) : hash(key), rank(value) {}
-    Pair() = default;
 };
 
 struct phrase_vector {
@@ -126,7 +119,7 @@ Parse compute_dict(
     // Send the chars before the first splitter to the previous PE
     int                        first_split = splits.front();
     std::vector<unsigned char> phrase_to_send(
-        data.begin() + params.window_size,
+        data.begin() + params.window_size - 1,
         data.begin() + first_split + params.window_size
     );
     size_t prev_pe = comm.rank_shifted_cyclic(-1);
@@ -139,6 +132,7 @@ Parse compute_dict(
         for (int i = 0; i < params.window_size; i++) {
             last_phrase.push_back(DOLLAR);
         }
+
         // Only send needed
         comm.sendrecv<unsigned char>(send_buf(phrase_to_send), destination(prev_pe), source(0));
         update_parse(dict, kr, hashes, last_phrase);
@@ -175,24 +169,6 @@ Parse compute_dict(
     return Parse{dict, hashes};
 }
 
-bool check_sort(std::vector<unsigned char> const& to_check) {
-    std::string prev;
-    std::string curr;
-
-    for (auto const c: to_check) {
-        curr.push_back(c);
-        if (c == DELIMITER) {
-            int check = curr.compare(prev);
-            if (check < 0) {
-                return false;
-            }
-            prev = curr;
-            curr = "";
-        }
-    }
-    return true;
-}
-
 std::vector<unsigned char> sort_dict(std::vector<unsigned char>& dict, Communicator<>& comm) {
     auto result = run_sorter(dict, comm);
     return result;
@@ -201,21 +177,17 @@ std::vector<unsigned char> sort_dict(std::vector<unsigned char>& dict, Communica
 std::vector<Pair> remove_duplicates(std::vector<unsigned char>& phrases, Communicator<>& comm, int window_size) {
     uint64_t          first_hash     = 0;
     bool              first_hash_set = false;
+    // todo what if the first hash == 0?
     uint64_t          prev_hash      = 0;
     uint64_t          hash           = 0;
     int               rank           = 0;
     std::vector<Pair> sorted_hashes;
     rabin_karp        rk{window_size};
     std::vector<unsigned char> curr_phrase;
+    std::vector<unsigned char> unique_phrases;
 
-    // write position for in-place compaction
-    size_t write_pos = 0;
-    size_t read_pos  = 0;
-    const size_t orig_size = phrases.size();
-
-
-    while (read_pos < orig_size) {
-        unsigned char c = phrases[read_pos++];
+    for (const unsigned char c: phrases) {
+        // End of phrase
         if (c == DELIMITER) {
             // Compute hash for the full phrase
             hash = rk.kr_print(curr_phrase);
@@ -226,23 +198,22 @@ std::vector<Pair> remove_duplicates(std::vector<unsigned char>& phrases, Communi
                 prev_hash      = hash;
                 sorted_hashes.emplace_back(hash, rank);
                 ++rank;
-
-                // write kept phrase in-place
-                if (!curr_phrase.empty()) {
-                    std::copy(curr_phrase.begin(), curr_phrase.end(), phrases.begin() + write_pos);
-                    write_pos += curr_phrase.size();
-                }
-                phrases[write_pos++] = DELIMITER;
+                unique_phrases.insert(
+                        unique_phrases.end(),
+                        curr_phrase.begin(),
+                        curr_phrase.end()
+                );
+                unique_phrases.push_back(DELIMITER);
             } else if (hash != prev_hash) {
                 sorted_hashes.emplace_back(hash, rank);
                 prev_hash = hash;
                 ++rank;
-
-                if (!curr_phrase.empty()) {
-                    std::copy(curr_phrase.begin(), curr_phrase.end(), phrases.begin() + write_pos);
-                    write_pos += curr_phrase.size();
-                }
-                phrases[write_pos++] = DELIMITER;
+                unique_phrases.insert(
+                        unique_phrases.end(),
+                        curr_phrase.begin(),
+                        curr_phrase.end()
+                );
+                unique_phrases.push_back(DELIMITER);
             }
             curr_phrase.clear();
             rk.reset();
@@ -251,18 +222,28 @@ std::vector<Pair> remove_duplicates(std::vector<unsigned char>& phrases, Communi
             curr_phrase.push_back(c);
         }
     }
-
-    // Resize phrases to the new compacted size
-    phrases.resize(write_pos);
+    phrases.swap(unique_phrases);
 
     // Exchange last hashes to remove duplicates across PEs
     // Each PE sends its last hash to the next PE and compares it to its first hash
+
+    // Check if the first hash has been deleted, as this will change the ranks for all other hashes
+    int erased = 0;
+
     if (comm.size() > 1) {
         auto next_pe = comm.rank_shifted_cyclic(1);
         auto prev_pe = comm.rank_shifted_cyclic(-1);
         auto res     = comm.sendrecv<uint64_t>(send_buf(prev_hash), destination(next_pe), source(prev_pe));
         if (res.front() == first_hash) {
+            // Erase the first hash and the first phrase
             sorted_hashes.erase(sorted_hashes.begin());
+            for (int i = 0; i < phrases.size(); ++i) {
+                if (phrases[i] == DELIMITER) {
+                    phrases.erase(phrases.begin(), phrases.begin() + i + 1);
+                    break;
+                }
+            }
+            erased = 1;
         }
     }
 
@@ -273,7 +254,7 @@ std::vector<Pair> remove_duplicates(std::vector<unsigned char>& phrases, Communi
     if (offset != 0) {
         // Update local ranks to global ranks
         for (auto& p: sorted_hashes) {
-            p.rank += offset;
+            p.rank += offset - erased;
         }
     }
     return sorted_hashes;
@@ -306,16 +287,27 @@ sort_hashes(std::vector<Pair>& hash_vec, Communicator<>& comm) {
 
     Ams::sort(create_pair_type(), hash_vec, kway, gen, comm.mpi_communicator(), pair_comp);
 
+    bool check = check_sort_unique_global(hash_vec, comm);
+    if (!check) {
+        std::cout << "Error: PE " << comm.rank_signed() << " found sorting error in global hash sort\n";
+    }
+
     std::unordered_map<uint64_t, int> map;
     for (auto const& p: hash_vec) {
         map.insert({p.hash, p.rank});
+    }
+
+    if (hash_vec.empty()) {
+        // todo: fix this edge case
+        std::cout << "Error: PE " << comm.rank_signed() << " has an empty hash vector after sorting\n";
+        exit(1);
     }
     return {map, hash_vec.back().hash};
 }
 
 
 std::vector<uint32_t> exchange_hashes(
-    std::unordered_map<uint64_t, int>& hash_vec,
+    std::unordered_map<uint64_t, int>& hash_map,
     std::vector<uint64_t> const&       hashes,
     uint64_t                           last_hash,
     Communicator<> const&              comm
@@ -326,8 +318,8 @@ std::vector<uint32_t> exchange_hashes(
     for (auto const& h: hashes) {
         auto const it = std::ranges::lower_bound(border_hashes, h);
         auto const dist = std::distance(border_hashes.begin(), it);
-        // distance returns a signed type; cast to size_t and clamp to last peer if it == border_hashes.size()
-        size_t pe = static_cast<size_t>(dist);
+
+        auto pe = static_cast<size_t>(dist);
         if (pe >= border_hashes.size()) {
             pe = border_hashes.size() - 1;
         }
@@ -356,19 +348,21 @@ std::vector<uint32_t> exchange_hashes(
     // Build responses in the same order as recv_buf
     responses.reserve(recv_buf.size());
     for (auto const& hash: recv_buf) {
-        auto it = hash_vec.find(hash);
-        if (it != hash_vec.end()) {
+        auto it = hash_map.find(hash);
+        if (it != hash_map.end()) {
             responses.push_back(it->second);
         } else {
-            // Unexpected: requested hash not found in the local hash map
-            responses.push_back(-1);
+            // Requested hash not found in the local hash map
+            std::cout << "Error: PE " << comm.rank_signed() << " did not find hash " << hash << " in its local map\n";
+            // todo clean exit
+            exit(1);
         }
     }
 
     // Send back the responses; The number of responses to send back to each rank is exactly the counts we received from them.
     auto             result = comm.alltoallv(send_buf(responses), send_counts(recv_counts));
 
-    // Compute starting offsets into the flattened requests vector for each peer
+    // Compute starting offsets into the flattened requests vector for each pe
     std::vector<int> offsets(comm.size());
     int              off = 0;
     for (size_t peer = 0; peer < hashes_to_request.size(); ++peer) {
@@ -410,9 +404,11 @@ int main(int argc, char const* argv[]) {
 
     auto total_splits = comm.allreduce_single(send_buf(splits.size()), kamping::op(kamping::ops::plus<>()));
 
-    //std::string to_print =
-    //    std::format("{:.2f} % of the splits ({}) \n", (100.0 * splits.size()) / total_splits, splits.size());
-    //printer.print_all_on_root(to_print, comm);
+
+    std::cout << "PE " << comm.rank_signed() << " found " << splits.size() << " splitters, total splitters: " << total_splits
+              << "\n";
+
+
     comm.barrier();
     // Compute phrases
     timer.synchronize_and_start("Compute dict");
@@ -428,14 +424,19 @@ int main(int argc, char const* argv[]) {
     auto sorted_dict = sort_dict(parse.dict, comm);
     timer.stop();
 
-    bool check = check_sort(sorted_dict);
-    printer.print_on_root(std::to_string(check), comm);
+    bool check = check_sort(sorted_dict, DELIMITER);
+    printer.print_all_on_root(std::format("Phrase sorting is correct: {} \n", check), comm);
 
     // Remove duplicates and hash sorted phrases
     timer.synchronize_and_start("Remove duplicates");
     auto phrase_map = remove_duplicates(sorted_dict, comm, params.window_size);
     timer.stop();
 
+    check = check_sort_unique(sorted_dict, DELIMITER);
+    printer.print_all_on_root(std::format("Duplicates removal sorting is correct: {} \n", check), comm);
+
+    bool dup_check = check_duplicates(phrase_map);
+    printer.print_all_on_root(std::format("Duplicates removal is correct: {} \n", dup_check), comm);
 
     // Globally sort hashes
     timer.synchronize_and_start("Sort hashes");
@@ -450,10 +451,9 @@ int main(int argc, char const* argv[]) {
     auto final_ranks = exchange_hashes(hashes, parse.hashes, last_hash, comm);
     timer.stop();
 
-    if (comm.size() == 1 && comm.is_root()) {
-        check = check_parsing(final_ranks, params, sorted_dict, comm, DELIMITER);
-        printer.print_on_root(std::format("Parsing is correct: {} \n", check), comm);
-    }
+    check = check_parsing(final_ranks, params, sorted_dict, comm, DELIMITER);
+    printer.print_all_on_root(std::format("Parsing is correct: {} \n", check), comm);
+
 
     int max_rank = std::max(final_ranks.front(), final_ranks.back());
 
