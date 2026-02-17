@@ -1,4 +1,5 @@
 #include "../../external/scalable-distributed-string-sorting/src/executables/sort_caller.cpp"
+#include "../../external/psac/src/sa_lcp_caller.cpp"
 #include <iostream>
 #include <ranges>
 #include <vector>
@@ -481,6 +482,15 @@ int main(int argc, char const* argv[]) {
     if (comm.is_root()) {
         std::cout << "SA check : " << sa_correct << "\n";
     }
+
+    timer.synchronize_and_start("Compute SA and LCP of D");
+    std::string sorted_dict_string(reinterpret_cast<const char*>(sorted_dict.data()), sorted_dict.size());
+
+    auto sa = sa_builder();
+    sa.construct_sa_lcp(comm.mpi_communicator(), sorted_dict_string);
+
+    auto& sa_result = sa.get_sa();
+    auto& lcp_result = sa.get_lcp();
 
 
     timer.aggregate_and_print(kamping::measurements::SimpleJsonPrinter<>(printer.get_ostream()));
