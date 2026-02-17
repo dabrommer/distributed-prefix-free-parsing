@@ -5,6 +5,7 @@
 
 #include "AmsSort/AmsSort.hpp"
 #include "checks/check_parsing.hpp"
+#include "checks/check_sa.hpp"
 #include "hash/rabin-karp.hpp"
 #include "kamping/collectives/allreduce.hpp"
 #include "kamping/collectives/gather.hpp"
@@ -471,9 +472,19 @@ int main(int argc, char const* argv[]) {
         sa_argv[i] = arg_strings[i].c_str();
     }
 
+    for (auto& v : final_ranks) {
+        v++;
+    }
+
     timer.synchronize_and_start("Compute SA of P");
     auto values = get_sa(final_ranks, comm, sa_argc, sa_argv);
     timer.stop();
+
+    bool sa_correct = check_sa(values, final_ranks, comm);
+    if (comm.is_root()) {
+        std::cout << "SA check : " << sa_correct << "\n";
+    }
+
 
     timer.aggregate_and_print(kamping::measurements::SimpleJsonPrinter<>(printer.get_ostream()));
     return 0;
