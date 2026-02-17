@@ -4,4 +4,5 @@ target_sources(base
     cli_parser.hpp
     logger.hpp
     dcx_caller.hpp
+    pair.hpp
 )
