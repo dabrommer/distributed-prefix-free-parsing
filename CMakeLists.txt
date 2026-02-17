@@ -37,7 +37,7 @@ endif()
 include(FetchContent)
 
 add_subdirectory(external/scalable-distributed-string-sorting)
-
+add_subdirectory(external/psac)
 
 FetchContent_Declare(
         kadis
@@ -75,6 +75,7 @@ add_executable(PFP src/executables/pfp_runner.cpp)
 target_link_libraries(PFP PRIVATE base)
 target_link_libraries(PFP PRIVATE sort_caller_lib)
 target_link_libraries(PFP PRIVATE DDCX_lib::DDCX_lib)
+target_link_libraries(PFP PRIVATE sa_lcp_caller_lib)
 
 
 

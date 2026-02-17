@@ -1,3 +1,6 @@
 [submodule "external/scalable-distributed-string-sorting"]
 	path = external/scalable-distributed-string-sorting
 	url = git@github.com:dabrommer/scalable-distributed-string-sorting.git
+[submodule "external/psac"]
+	path = external/psac
+	url = git@github.com:dabrommer/psac.git
