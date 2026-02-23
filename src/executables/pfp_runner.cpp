@@ -16,6 +16,7 @@
 #include "kamping/p2p/send.hpp"
 #include "kamping/p2p/sendrecv.hpp"
 #include "mpi/data_distribution.hpp"
+#include "mpi/mpi_utils.hpp"
 #include "util/cli_parser.hpp"
 #include "util/logger.hpp"
 #include "util/dcx_caller.hpp"
@@ -484,7 +485,31 @@ int main(int argc, char const* argv[]) {
     }
 
     timer.synchronize_and_start("Compute SA and LCP of D");
-    std::string sorted_dict_string(reinterpret_cast<const char*>(sorted_dict.data()), sorted_dict.size());
+
+    // psac requires a correct block distribution of the input data
+
+    auto total_dict_size = comm.allreduce_single(send_buf(sorted_dict.size()), kamping::op(kamping::ops::plus<>()));
+
+    auto slice_size = total_dict_size / comm.size();
+    auto res_size = total_dict_size % comm.size();
+
+    auto local_target_size = slice_size + (comm.rank() < res_size ? 1 : 0);
+
+
+    auto out = distribute_data_custom(sorted_dict, local_target_size, comm);
+
+    std::string sorted_dict_string;//(reinterpret_cast<const char*>(out.data()), out.size());
+    for (auto c : out) {
+        if (c == DELIMITER) {
+            sorted_dict_string.push_back(DELIMITER + 1);
+        } else if (c == DOLLAR) {
+            sorted_dict_string.push_back(DOLLAR + 1);
+        } else {
+            sorted_dict_string.push_back(static_cast<char>(c));
+        }
+    }
+
+    std::cout << "PE " << comm.rank_signed() << " has " << sorted_dict_string.size() << " chars after redistribution for SA computation\n";
 
     auto sa = sa_builder();
     sa.construct_sa_lcp(comm.mpi_communicator(), sorted_dict_string);
@@ -492,6 +517,16 @@ int main(int argc, char const* argv[]) {
     auto& sa_result = sa.get_sa();
     auto& lcp_result = sa.get_lcp();
 
+
+    std::vector<unsigned char> dict;
+    for (auto c : sorted_dict_string) {
+        dict.push_back(static_cast<unsigned char>(c));
+    }
+
+    bool t = check_sa(sa_result, dict, comm);
+    if (comm.is_root()) {
+        std::cout << "SA check for D: " << t << "\n";
+    }
 
     timer.aggregate_and_print(kamping::measurements::SimpleJsonPrinter<>(printer.get_ostream()));
     return 0;
