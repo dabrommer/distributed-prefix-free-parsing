@@ -396,6 +396,29 @@ std::vector<uint32_t> compute_occ(std::vector<uint32_t>& parse, Communicator<>& 
     return std::move(rank_counts);
 }
 
+std::vector<uint32_t> compute_phrase_prefix_sum(std::vector<unsigned char>& dict, Communicator<>& comm) {
+
+    std::vector<uint32_t> prefix_sum;
+    uint32_t              sum = 0;
+
+    for (auto c: dict) {
+        ++sum;
+        if (c == DELIMITER) {
+            prefix_sum.push_back(sum);
+        }
+    }
+
+    auto local_size = static_cast<uint32_t>(dict.size());
+    auto offset = comm.exscan_single(send_buf(local_size), op(kamping::ops::plus<>{}));
+
+    for (auto& value : prefix_sum) {
+        value += offset;
+    }
+
+    auto global_prefix_sum = comm.allgatherv(send_buf(prefix_sum));
+    return global_prefix_sum;
+}
+
 int main(int argc, char const* argv[]) {
     kamping::Environment  env;
     kamping::Communicator comm;
@@ -501,6 +524,9 @@ int main(int argc, char const* argv[]) {
 
     timer.stop();
 
+    timer.synchronize_and_start("Compute prefix sums");
+    auto phrase_prefixes = compute_phrase_prefix_sum(sorted_dict, comm);
+    timer.stop();
 
     timer.synchronize_and_start("Compute SA and LCP of D");
 
