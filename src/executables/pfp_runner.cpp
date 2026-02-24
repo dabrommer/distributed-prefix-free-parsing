@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "AmsSort/AmsSort.hpp"
+#include "bwt/bwt.hpp"
 #include "checks/check_parsing.hpp"
 #include "checks/check_sa.hpp"
 #include "hash/rabin-karp.hpp"
@@ -466,17 +467,16 @@ int main(int argc, char const* argv[]) {
         printer.print_rank_distribution(final_ranks, comm);
     }
 
-    auto arg_strings = get_dcx_args();
+    // todo bwt needs redistribution for correct sa_index <-> pe computation, this can be fixed
+    auto total_rank_size = comm.allreduce_single(send_buf(final_ranks.size()), kamping::op(kamping::ops::plus<>()));
+    auto rank_slice_size = total_rank_size / comm.size();
+    auto rank_res_size = total_rank_size % comm.size();
 
-    auto sa_argc = static_cast<int32_t>(arg_strings.size());
-    char const* sa_argv[sa_argc];
-
-    for (int i = 0; i < sa_argc; ++i) {
-        sa_argv[i] = arg_strings[i].c_str();
-    }
+    auto rank_local_target_size = rank_slice_size + (comm.rank() < rank_res_size ? 1 : 0);
+    auto ranks_out = distribute_data_custom(final_ranks, rank_local_target_size, comm);
 
     timer.synchronize_and_start("Compute SA of P");
-    auto values = get_sa(final_ranks, comm, sa_argc, sa_argv);
+    auto values = compute_bwt(ranks_out, comm);//get_sa(final_ranks, comm, sa_argc, sa_argv);
     timer.stop();
 
     bool sa_correct = check_sa(values, final_ranks, comm);
@@ -498,10 +498,15 @@ int main(int argc, char const* argv[]) {
 
     auto out = distribute_data_custom(sorted_dict, local_target_size, comm);
 
-    std::string sorted_dict_string;//(reinterpret_cast<const char*>(out.data()), out.size());
-    for (auto c : out) {
+    std::vector<unsigned char> last_char_per_phrase;
+
+    std::string sorted_dict_string;
+    for (int i = 0; i < out.size(); ++i) {
+        char c = out[i];
         if (c == DELIMITER) {
             sorted_dict_string.push_back(DELIMITER + 1);
+            // Store the last char of each phrase
+            last_char_per_phrase.push_back(out[i - params.window_size]);
         } else if (c == DOLLAR) {
             sorted_dict_string.push_back(DOLLAR + 1);
         } else {
@@ -509,7 +514,6 @@ int main(int argc, char const* argv[]) {
         }
     }
 
-    std::cout << "PE " << comm.rank_signed() << " has " << sorted_dict_string.size() << " chars after redistribution for SA computation\n";
 
     auto sa = sa_builder();
     sa.construct_sa_lcp(comm.mpi_communicator(), sorted_dict_string);
