@@ -385,6 +385,17 @@ std::vector<uint32_t> exchange_hashes(
     return final_ranks;
 }
 
+std::vector<uint32_t> compute_occ(std::vector<uint32_t>& parse, Communicator<>& comm, size_t max_rank) {
+    std::vector<uint32_t> rank_counts(max_rank, 0);
+    for (auto r: parse) {
+        // final_ranks is 1-based, rank_counts is 0-based
+        rank_counts[r - 1]++;
+    }
+
+    comm.allreduce_inplace(send_recv_buf(rank_counts), op(kamping::ops::plus<>()));
+    return std::move(rank_counts);
+}
+
 int main(int argc, char const* argv[]) {
     kamping::Environment  env;
     kamping::Communicator comm;
@@ -483,6 +494,13 @@ int main(int argc, char const* argv[]) {
     if (comm.is_root()) {
         std::cout << "SA check : " << sa_correct << "\n";
     }
+
+    timer.synchronize_and_start("Compute rank counts");
+
+    auto phrase_occ = compute_occ(final_ranks, comm, max_rank);
+
+    timer.stop();
+
 
     timer.synchronize_and_start("Compute SA and LCP of D");
 
