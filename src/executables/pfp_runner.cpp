@@ -419,6 +419,19 @@ std::vector<uint32_t> compute_phrase_prefix_sum(std::vector<unsigned char>& dict
     return global_prefix_sum;
 }
 
+std::vector<uint32_t> compute_phrase_mapping(std::vector<uint32_t>& phrase_sa, std::vector<uint32_t>& phrase_prefix_sum) {
+    std::vector<uint32_t> mapping(phrase_sa.size(), 0);
+
+    for (size_t i = 0; i < phrase_sa.size(); ++i) {
+        uint32_t sa_value = phrase_sa[i];
+        // Binary search in prefix sum to find the corresponding phrase
+        auto      it       = std::ranges::upper_bound(phrase_prefix_sum, sa_value);
+        size_t    index    = std::distance(phrase_prefix_sum.begin(), it);
+        mapping[i] = static_cast<uint32_t>(index);
+    }
+    return mapping;
+}
+
 int main(int argc, char const* argv[]) {
     kamping::Environment  env;
     kamping::Communicator comm;
@@ -494,10 +507,11 @@ int main(int argc, char const* argv[]) {
     printer.print_all_on_root(std::format("Parsing is correct: {} \n", check), comm);
 
 
-    int max_rank = std::max(final_ranks.front(), final_ranks.back());
+    int local_max_rank = std::ranges::max(final_ranks);
+    int global_max_rank = comm.allreduce_single(send_buf(local_max_rank), kamping::op(kamping::ops::max<>()));
 
     if (params.verbose) {
-        printer.print_on_root(std::format("Max Rank: {} \n", max_rank), comm);
+        printer.print_on_root(std::format("Max Rank: {} \n", global_max_rank), comm);
         printer.print_rank_distribution(final_ranks, comm);
     }
 
@@ -510,7 +524,7 @@ int main(int argc, char const* argv[]) {
     auto ranks_out = distribute_data_custom(final_ranks, rank_local_target_size, comm);
 
     timer.synchronize_and_start("Compute SA of P");
-    auto values = compute_bwt(ranks_out, comm);//get_sa(final_ranks, comm, sa_argc, sa_argv);
+    auto values = compute_bwt(ranks_out, comm);
     timer.stop();
 
     bool sa_correct = check_sa(values, final_ranks, comm);
@@ -519,13 +533,15 @@ int main(int argc, char const* argv[]) {
     }
 
     timer.synchronize_and_start("Compute rank counts");
-
-    auto phrase_occ = compute_occ(final_ranks, comm, max_rank);
-
+    auto phrase_occ = compute_occ(final_ranks, comm, global_max_rank);
     timer.stop();
 
     timer.synchronize_and_start("Compute prefix sums");
     auto phrase_prefixes = compute_phrase_prefix_sum(sorted_dict, comm);
+    timer.stop();
+
+    timer.synchronize_and_start("Compute phrase mapping");
+    auto phrase_mapping = compute_phrase_mapping(values, phrase_prefixes);
     timer.stop();
 
     timer.synchronize_and_start("Compute SA and LCP of D");
