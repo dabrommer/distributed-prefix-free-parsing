@@ -1,32 +1,43 @@
 #pragma once
 
 #include <print>
+#include <map>
+#include <fstream>
 
 #include <kamping/communicator.hpp>
 
 namespace logs {
 
-struct printer {
-
-    printer() : out(&std::cout) {}  ;
-
-
-    explicit printer(const std::string& filename)
-        : file_stream(filename), out(&file_stream)
-    {}
-
-    ~printer() {
-
+class logger {
+public:
+    // Initialize the logger with a communicator reference
+    static void set_comm(Communicator<> const& comm) {
+        comm_ptr = &comm;
+        out = &std::cout;
     }
 
-    std::ostream& get_ostream()
-    {
-        return file_stream;
-
+    // Initialize the logger with a communicator and output file
+    static void set_comm(Communicator<> const& comm, const std::string& filename) {
+        comm_ptr = &comm;
+        if (file_stream.is_open()) {
+            file_stream.close();
+        }
+        file_stream.open(filename);
+        out = &file_stream;
     }
 
+    // Get the output stream being used by the logger
+    static std::ostream& get_ostream() {
+        if (out == nullptr) {
+            return std::cout;
+        }
+        return *out;
+    }
 
-    void log_phrase_size(std::vector<unsigned char> const& data, Communicator<> const& comm, char const delimiter) {
+    // Log phrase sizes with delimiter
+    template<typename char_type>
+    static void log_phrase_size(std::vector<char_type> const& data, char const delimiter) {
+        if (!check_initialized()) return;
         std::map<std::size_t, std::size_t> counts;
 
         size_t current_size = 0;
@@ -39,15 +50,17 @@ struct printer {
             }
         }
 
-        print_map_to_json(counts, comm);
+        print_map_to_json(counts);
     }
 
-    void print_all_on_root(std::string const& to_print, Communicator<> const& comm) {
+    // Print message from all ranks on root
+    static void print_all_on_root(std::string const& to_print) {
+        if (!check_initialized()) return;
         std::vector<char> out_vec(to_print.begin(), to_print.end());
 
-        auto outs = comm.gatherv(send_buf(out_vec), recv_counts_out());
+        auto outs = comm_ptr->gatherv(send_buf(out_vec), recv_counts_out());
 
-        if (comm.is_root()) {
+        if (comm_ptr->is_root()) {
             auto offsets = outs.extract_recv_counts();
             auto strings = outs.get_recv_buffer();
             int  rank    = 0;
@@ -57,18 +70,38 @@ struct printer {
                 std::print(*out, "PE [{}]: {}\n", rank, result);
                 ++rank;
             }
+            out->flush();
         }
     }
 
-    void print_on_root(std::string const& to_print, Communicator<> const& comm) {
-        if (comm.is_root()) {
-            std::print(*out, "PE [{}]: ", comm.rank());
-            std::print(*out, "{} \n", to_print);
+    // Print formatted message from all ranks on root
+    template<typename... Args>
+    static void print_all_on_root(std::format_string<Args...> fmt, Args&&... args) {
+        std::string formatted = std::format(fmt, std::forward<Args>(args)...);
+        print_all_on_root(formatted);
+    }
+
+    // Print message only on root rank
+    static void print_on_root(std::string const& to_print) {
+        if (!check_initialized()) return;
+        if (comm_ptr->is_root()) {
+            std::print(*out, "PE [{}]: ", comm_ptr->rank());
+            std::print(*out, "{}", to_print);
+            out->flush();
         }
     }
 
+    // Print formatted message only on root rank
+    template<typename... Args>
+    static void print_on_root(std::format_string<Args...> fmt, Args&&... args) {
+        std::string formatted = std::format(fmt, std::forward<Args>(args)...);
+        print_on_root(formatted);
+    }
+
+    // Print map as JSON from all ranks
     template<typename key, typename value>
-    void print_map_to_json(std::map<key, value>& values, const Communicator<>& comm) {
+    static void print_map_to_json(std::map<key, value>& values) {
+        if (!check_initialized()) return;
 
         std::string output("{\n");
         for (auto it = values.begin(); it != values.end(); ++it) {
@@ -80,10 +113,10 @@ struct printer {
 
         std::vector<char> out_vec(output.begin(), output.end());
 
-        auto outs = comm.gatherv(send_buf(out_vec), recv_counts_out());
+        auto outs = comm_ptr->gatherv(send_buf(out_vec), recv_counts_out());
 
         // print results on root
-        if (comm.is_root()) {
+        if (comm_ptr->is_root()) {
             auto const offsets = outs.extract_recv_counts();
             auto       strings = outs.get_recv_buffer();
             int        rank    = 0;
@@ -94,11 +127,14 @@ struct printer {
                 std::print(*out, "{}\n", result);
                 ++rank;
             }
+            out->flush();
         }
     }
 
-    void print_rank_distribution(const std::vector<uint32_t>& ranks, const Communicator<>& comm) {
-        if (!comm.is_root()) {
+    // Print rank distribution
+    static void print_rank_distribution(const std::vector<uint32_t>& ranks) {
+        if (!check_initialized()) return;
+        if (!comm_ptr->is_root()) {
             return;
         }
         std::map<int, int> distribution;
@@ -106,14 +142,21 @@ struct printer {
             distribution[r]++;
         }
 
-        print_map_to_json(distribution, comm);
-
+        print_map_to_json(distribution);
     }
 
 private:
-    std::string filename = "log.txt";
-    std::ofstream file_stream;
-    std::ostream* out;
+    static bool check_initialized() {
+        if (comm_ptr == nullptr) {
+            std::print(std::cerr, "Logger not initialized, logging disabled. Call logger::set_comm() first.\n");
+            return false;
+        }
+        return true;
+    }
+
+    inline static Communicator<> const* comm_ptr = nullptr;
+    inline static std::ofstream file_stream;
+    inline static std::ostream* out = &std::cout;
 };
 
 } // namespace logs

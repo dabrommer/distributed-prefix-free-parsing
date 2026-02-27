@@ -25,6 +25,7 @@
 #include "algorithm/pfp.hpp"
 #include "DDCX_lib/dss_interface.hpp"
 
+using namespace logs;
 
 int main(int argc, char const* argv[]) {
     kamping::Environment  env;
@@ -34,7 +35,7 @@ int main(int argc, char const* argv[]) {
 
     std::string out_name = params.input_path + "_n_" + std::to_string(comm.size()) + "_w_"
                            + std::to_string(params.window_size) + "_p_" + std::to_string(params.p_mod) + ".txt";
-    logs::printer printer(out_name);
+    logger::set_comm(comm, out_name);
 
     auto& timer = kamping::measurements::timer();
 
@@ -50,10 +51,7 @@ int main(int argc, char const* argv[]) {
 
     auto total_splits = comm.allreduce_single(send_buf(splits.size()), kamping::op(kamping::ops::plus<>()));
 
-
-    std::cout << "PE " << comm.rank_signed() << " found " << splits.size() << " splitters, total splitters: " << total_splits
-              << "\n";
-
+    logger::print_all_on_root("Found {} splitters, total splitters: {}\n", splits.size(), total_splits);
 
     comm.barrier();
     // Compute phrases
@@ -71,7 +69,7 @@ int main(int argc, char const* argv[]) {
     timer.stop();
 
     bool check = check_sort(sorted_dict, DELIMITER);
-    printer.print_all_on_root(std::format("Phrase sorting is correct: {} \n", check), comm);
+    logger::print_all_on_root("Phrase sorting is correct: {} \n", check);
 
     // Remove duplicates and hash sorted phrases
     timer.synchronize_and_start("Remove duplicates");
@@ -79,10 +77,10 @@ int main(int argc, char const* argv[]) {
     timer.stop();
 
     check = check_sort_unique(sorted_dict, DELIMITER);
-    printer.print_all_on_root(std::format("Duplicates removal sorting is correct: {} \n", check), comm);
+    logger::print_all_on_root("Duplicates removal sorting is correct: {} \n", check);
 
     bool dup_check = check_duplicates(phrase_map);
-    printer.print_all_on_root(std::format("Duplicates removal is correct: {} \n", dup_check), comm);
+    logger::print_all_on_root("Duplicates removal is correct: {} \n", dup_check);
 
     // Globally sort hashes
     timer.synchronize_and_start("Sort hashes");
@@ -98,14 +96,14 @@ int main(int argc, char const* argv[]) {
     timer.stop();
 
     check = check_parsing(final_ranks, params, sorted_dict, comm, DELIMITER);
-    printer.print_all_on_root(std::format("Parsing is correct: {} \n", check), comm);
+    logger::print_all_on_root("Parsing is correct: {} \n", check);
 
 
     int max_rank = std::max(final_ranks.front(), final_ranks.back());
 
     if (params.verbose) {
-        printer.print_on_root(std::format("Max Rank: {} \n", max_rank), comm);
-        printer.print_rank_distribution(final_ranks, comm);
+        logger::print_on_root("Max Rank: {} \n", max_rank);
+        logger::print_rank_distribution(final_ranks);
     }
 
     // todo bwt needs redistribution for correct sa_index <-> pe computation, this can be fixed
@@ -121,9 +119,7 @@ int main(int argc, char const* argv[]) {
     timer.stop();
 
     bool sa_correct = check_sa(values, final_ranks, comm);
-    if (comm.is_root()) {
-        std::cout << "SA check : " << sa_correct << "\n";
-    }
+    logger::print_on_root("SA check : {}\n", sa_correct);
 
     timer.synchronize_and_start("Compute SA and LCP of D");
 
@@ -169,11 +165,9 @@ int main(int argc, char const* argv[]) {
     }
 
     bool t = check_sa(sa_result, dict, comm);
-    if (comm.is_root()) {
-        std::cout << "SA check for D: " << t << "\n";
-    }
+    logger::print_on_root("SA check for D: {}\n", t);
 
-    timer.aggregate_and_print(kamping::measurements::SimpleJsonPrinter<>(printer.get_ostream()));
+    timer.aggregate_and_print(kamping::measurements::SimpleJsonPrinter<>(logger::get_ostream()));
     return 0;
 
 }
