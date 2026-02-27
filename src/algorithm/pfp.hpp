@@ -39,7 +39,32 @@ struct phrase_vector {
     }
 };
 
-std::vector<int> compute_splitters(std::vector<char>& data, Communicator<>& comm, Params const& params) {
+struct DictResult {
+    std::string                sorted_dict_string;
+    std::vector<unsigned char> last_char_per_phrase;
+};
+
+inline DictResult convert_dict_to_string(std::vector<unsigned char> const& dict_data, int window_size) {
+    DictResult result;
+    result.sorted_dict_string.reserve(dict_data.size());
+
+    for (int i = 0; i < dict_data.size(); ++i) {
+        char c = dict_data[i];
+        if (c == DELIMITER) {
+            result.sorted_dict_string.push_back(DELIMITER + 1);
+            // Store the last char of each phrase
+            result.last_char_per_phrase.push_back(dict_data[i - window_size]);
+        } else if (c == DOLLAR) {
+            result.sorted_dict_string.push_back(DOLLAR + 1);
+        } else {
+            result.sorted_dict_string.push_back(static_cast<char>(c));
+        }
+    }
+
+    return result;
+}
+
+inline std::vector<int> compute_splitters(std::vector<char>& data, Communicator<>& comm, Params const& params) {
     rabin_karp       rk(params.window_size);
     std::vector<int> splits;
     for (size_t i = 0; i < data.size(); i++) {
@@ -62,7 +87,7 @@ std::vector<int> compute_splitters(std::vector<char>& data, Communicator<>& comm
     return splits;
 }
 
-void update_parse(
+inline void update_parse(
     std::vector<unsigned char>&       dict,
     rabin_karp&                       rk,
     std::vector<uint64_t>&            hashes,
@@ -74,7 +99,7 @@ void update_parse(
     dict.push_back(DELIMITER);
 }
 
-Parse compute_dict(
+inline Parse compute_dict(
     std::vector<int> const& splits, std::vector<char> const& data, Params const& params, Communicator<>& comm
 ) {
     std::vector<unsigned char> dict;
@@ -162,12 +187,12 @@ Parse compute_dict(
     return Parse{dict, hashes};
 }
 
-std::vector<unsigned char> sort_dict(std::vector<unsigned char>& dict, Communicator<>& comm) {
+inline std::vector<unsigned char> sort_dict(std::vector<unsigned char>& dict, Communicator<>& comm) {
     auto result = run_sorter(dict, comm);
     return result;
 }
 
-std::vector<Pair> remove_duplicates(std::vector<unsigned char>& phrases, Communicator<>& comm, int window_size) {
+inline std::vector<Pair> remove_duplicates(std::vector<unsigned char>& phrases, Communicator<>& comm, int window_size) {
     uint64_t first_hash     = 0;
     bool     first_hash_set = false;
     // todo what if the first hash == 0?
@@ -246,7 +271,7 @@ std::vector<Pair> remove_duplicates(std::vector<unsigned char>& phrases, Communi
     return sorted_hashes;
 }
 
-MPI_Datatype create_pair_type() {
+inline MPI_Datatype create_pair_type() {
     MPI_Datatype pair_type;
 
     int blocklengths[2] = {1, 1};
@@ -262,7 +287,8 @@ MPI_Datatype create_pair_type() {
     return pair_type;
 }
 
-std::pair<std::unordered_map<uint64_t, int>, uint64_t> sort_hashes(std::vector<Pair>& hash_vec, Communicator<>& comm) {
+inline std::pair<std::unordered_map<uint64_t, int>, uint64_t>
+sort_hashes(std::vector<Pair>& hash_vec, Communicator<>& comm) {
     int const kway      = 64;
     auto      pair_comp = [](Pair const& a, Pair const& b) {
         return a.hash < b.hash;
@@ -290,7 +316,7 @@ std::pair<std::unordered_map<uint64_t, int>, uint64_t> sort_hashes(std::vector<P
     return {map, hash_vec.back().hash};
 }
 
-std::vector<uint32_t> exchange_hashes(
+inline std::vector<uint32_t> exchange_hashes(
     std::unordered_map<uint64_t, int>& hash_map,
     std::vector<uint64_t> const&       hashes,
     uint64_t                           last_hash,

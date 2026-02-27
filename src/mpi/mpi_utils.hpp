@@ -176,3 +176,14 @@ distribute_data_custom(std::vector<DataType>& local_data, int64_t local_target_s
     std::vector<DataType> result = alltoallv_combined(local_data, send_cnts, comm);
     return result;
 }
+
+template <typename DataType>
+std::vector<DataType> redistribute_block_balanced(std::vector<DataType>& local_data, kamping::Communicator<>& comm) {
+    auto total_size = comm.allreduce_single(send_buf(local_data.size()), kamping::op(kamping::ops::plus<>()));
+    auto slice_size = total_size / comm.size();
+    auto res_size   = total_size % comm.size();
+
+    auto local_target_size = slice_size + (comm.rank() < res_size ? 1 : 0);
+
+    return distribute_data_custom(local_data, local_target_size, comm);
+}

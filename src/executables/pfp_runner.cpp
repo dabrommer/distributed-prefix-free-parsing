@@ -9,7 +9,6 @@
 #include "checks/check_sa.hpp"
 #include "kamping/measurements/printer.hpp"
 #include "kamping/measurements/timer.hpp"
-#include "kamping/p2p/send.hpp"
 #include "mpi/data_distribution.hpp"
 #include "mpi/mpi_utils.hpp"
 #include "util/cli_parser.hpp"
@@ -40,10 +39,8 @@ int main(int argc, char const* argv[]) {
     timer.stop();
 
     auto total_splits = comm.allreduce_single(send_buf(splits.size()), kamping::op(kamping::ops::plus<>()));
-
     logger::print_all_on_root("Found {} splitters, total splitters: {}", splits.size(), total_splits);
 
-    comm.barrier();
     // Compute phrases
     timer.synchronize_and_start("Compute dict");
     auto parse = compute_dict(splits, data, params, comm);
@@ -95,55 +92,32 @@ int main(int argc, char const* argv[]) {
         logger::print_rank_distribution(final_ranks);
     }
 
+    // Compute BWT of P
+    timer.synchronize_and_start("Redistribute parse");
     // todo bwt needs redistribution for correct sa_index <-> pe computation, this can be fixed
-    auto total_rank_size = comm.allreduce_single(send_buf(final_ranks.size()), kamping::op(kamping::ops::plus<>()));
-    auto rank_slice_size = total_rank_size / comm.size();
-    auto rank_res_size   = total_rank_size % comm.size();
+    auto ranks_out = redistribute_block_balanced(final_ranks, comm);
+    timer.stop();
 
-    auto rank_local_target_size = rank_slice_size + (comm.rank() < rank_res_size ? 1 : 0);
-    auto ranks_out              = distribute_data_custom(final_ranks, rank_local_target_size, comm);
-
-    timer.synchronize_and_start("Compute SA of P");
-    auto values = compute_bwt(ranks_out, comm); // get_sa(final_ranks, comm, sa_argc, sa_argv);
+    timer.synchronize_and_start("Compute BWT of P");
+    auto values = compute_bwt(ranks_out, comm);
     timer.stop();
 
     bool sa_correct = check_sa(values, final_ranks, comm);
     logger::print_on_root("SA check : {}", sa_correct);
 
-    timer.synchronize_and_start("Compute SA and LCP of D");
+    // Redistribute phrases and get phrases in a std::string which is needed by psac
+    timer.synchronize_and_start("Prepare computation of the LCP and SA of D");
+    auto out                                        = redistribute_block_balanced(sorted_dict, comm);
+    auto [sorted_dict_string, last_char_per_phrase] = convert_dict_to_string(out, params.window_size);
+    timer.stop();
 
-    // psac requires a correct block distribution of the input data
-
-    auto total_dict_size = comm.allreduce_single(send_buf(sorted_dict.size()), kamping::op(kamping::ops::plus<>()));
-
-    auto slice_size = total_dict_size / comm.size();
-    auto res_size   = total_dict_size % comm.size();
-
-    auto local_target_size = slice_size + (comm.rank() < res_size ? 1 : 0);
-
-    auto out = distribute_data_custom(sorted_dict, local_target_size, comm);
-
-    std::vector<unsigned char> last_char_per_phrase;
-
-    std::string sorted_dict_string;
-    for (int i = 0; i < out.size(); ++i) {
-        char c = out[i];
-        if (c == DELIMITER) {
-            sorted_dict_string.push_back(DELIMITER + 1);
-            // Store the last char of each phrase
-            last_char_per_phrase.push_back(out[i - params.window_size]);
-        } else if (c == DOLLAR) {
-            sorted_dict_string.push_back(DOLLAR + 1);
-        } else {
-            sorted_dict_string.push_back(static_cast<char>(c));
-        }
-    }
-
+    timer.synchronize_and_start("Compute LCP and SA of D");
     auto sa = sa_builder();
     sa.construct_sa_lcp(comm.mpi_communicator(), sorted_dict_string);
 
     auto& sa_result  = sa.get_sa();
     auto& lcp_result = sa.get_lcp();
+    timer.stop();
 
     std::vector<unsigned char> dict;
     for (auto c: sorted_dict_string) {
@@ -154,5 +128,6 @@ int main(int argc, char const* argv[]) {
     logger::print_on_root("SA check for D: {}", t);
 
     timer.aggregate_and_print(kamping::measurements::SimpleJsonPrinter<>(logger::get_ostream()));
+
     return 0;
 }
