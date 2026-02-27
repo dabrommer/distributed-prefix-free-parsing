@@ -1,4 +1,4 @@
-#pragme once
+#pragma once
 
 #include <iostream>
 #include <vector>
@@ -154,3 +154,4 @@ std::vector<uint32_t> compute_bwt(std::vector<char_type>& parse, Communicator<>&
 
     return std::move(bwt);
 }
+
