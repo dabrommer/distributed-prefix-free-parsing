@@ -1,16 +1,15 @@
 #pragma once
 
 #include <iostream>
-#include <ranges>
-#include <vector>
-#include <unordered_map>
 #include <random>
+#include <ranges>
+#include <unordered_map>
+#include <vector>
 
 #include "AmsSort/AmsSort.hpp"
+#include "checks/check_parsing.hpp"
 #include "hash/rabin-karp.hpp"
-#include "kamping/collectives/allreduce.hpp"
 #include "kamping/p2p/sendrecv.hpp"
-#include "mpi/mpi_utils.hpp"
 #include "util/cli_parser.hpp"
 #include "util/pair.hpp"
 
@@ -47,7 +46,8 @@ std::vector<int> compute_splitters(std::vector<char>& data, Communicator<>& comm
         uint64_t hash = rk.add_char(data[i]);
 
         if (data[i] == DOLLAR || data[i] == DELIMITER) {
-            std::cout << "Found char " << data[i] << " in data at position " << i << " on PE " << comm.rank_signed() << "\n";
+            std::cout << "Found char " << data[i] << " in data at position " << i << " on PE " << comm.rank_signed()
+                      << "\n";
         }
 
         // Make sure the window is filled
@@ -88,7 +88,6 @@ Parse compute_dict(
         first_phrase.push_back(DOLLAR);
         first_phrase.insert(first_phrase.end(), data.begin(), data.begin() + splits[0] + params.window_size);
         update_parse(dict, kr, hashes, first_phrase);
-
     }
 
     // Extract all phrases except the last one (safe loop)
@@ -169,19 +168,19 @@ std::vector<unsigned char> sort_dict(std::vector<unsigned char>& dict, Communica
 }
 
 std::vector<Pair> remove_duplicates(std::vector<unsigned char>& phrases, Communicator<>& comm, int window_size) {
-    uint64_t          first_hash     = 0;
-    bool              first_hash_set = false;
+    uint64_t first_hash     = 0;
+    bool     first_hash_set = false;
     // todo what if the first hash == 0?
-    uint64_t          prev_hash      = 0;
-    uint64_t          hash           = 0;
+    uint64_t prev_hash = 0;
+    uint64_t hash      = 0;
     // 1-based ranks are needed (dcx has 0 reserved)
-    int               rank           = 1;
-    std::vector<Pair> sorted_hashes;
-    rabin_karp        rk{window_size};
+    int                        rank = 1;
+    std::vector<Pair>          sorted_hashes;
+    rabin_karp                 rk{window_size};
     std::vector<unsigned char> curr_phrase;
     std::vector<unsigned char> unique_phrases;
 
-    for (const unsigned char c: phrases) {
+    for (unsigned char const c: phrases) {
         // End of phrase
         if (c == DELIMITER) {
             // Compute hash for the full phrase
@@ -193,21 +192,13 @@ std::vector<Pair> remove_duplicates(std::vector<unsigned char>& phrases, Communi
                 prev_hash      = hash;
                 sorted_hashes.emplace_back(hash, rank);
                 ++rank;
-                unique_phrases.insert(
-                        unique_phrases.end(),
-                        curr_phrase.begin(),
-                        curr_phrase.end()
-                );
+                unique_phrases.insert(unique_phrases.end(), curr_phrase.begin(), curr_phrase.end());
                 unique_phrases.push_back(DELIMITER);
             } else if (hash != prev_hash) {
                 sorted_hashes.emplace_back(hash, rank);
                 prev_hash = hash;
                 ++rank;
-                unique_phrases.insert(
-                        unique_phrases.end(),
-                        curr_phrase.begin(),
-                        curr_phrase.end()
-                );
+                unique_phrases.insert(unique_phrases.end(), curr_phrase.begin(), curr_phrase.end());
                 unique_phrases.push_back(DELIMITER);
             }
             curr_phrase.clear();
@@ -243,7 +234,7 @@ std::vector<Pair> remove_duplicates(std::vector<unsigned char>& phrases, Communi
     }
 
     // Compute offset for global ranks
-    auto  size   = sorted_hashes.size();
+    auto size   = sorted_hashes.size();
     auto offset = static_cast<int>(comm.exscan_single(send_buf(size), op(kamping::ops::plus<>())));
 
     if (offset != 0) {
@@ -271,8 +262,7 @@ MPI_Datatype create_pair_type() {
     return pair_type;
 }
 
-std::pair<std::unordered_map<uint64_t, int>, uint64_t>
-sort_hashes(std::vector<Pair>& hash_vec, Communicator<>& comm) {
+std::pair<std::unordered_map<uint64_t, int>, uint64_t> sort_hashes(std::vector<Pair>& hash_vec, Communicator<>& comm) {
     int const kway      = 64;
     auto      pair_comp = [](Pair const& a, Pair const& b) {
         return a.hash < b.hash;
@@ -300,7 +290,6 @@ sort_hashes(std::vector<Pair>& hash_vec, Communicator<>& comm) {
     return {map, hash_vec.back().hash};
 }
 
-
 std::vector<uint32_t> exchange_hashes(
     std::unordered_map<uint64_t, int>& hash_map,
     std::vector<uint64_t> const&       hashes,
@@ -311,7 +300,7 @@ std::vector<uint32_t> exchange_hashes(
     std::vector<std::vector<uint64_t>> hashes_to_request(comm.size());
     std::vector<int>                   pe_order;
     for (auto const& h: hashes) {
-        auto const it = std::ranges::lower_bound(border_hashes, h);
+        auto const it   = std::ranges::lower_bound(border_hashes, h);
         auto const dist = std::distance(border_hashes.begin(), it);
 
         auto pe = static_cast<size_t>(dist);
@@ -336,7 +325,6 @@ std::vector<uint32_t> exchange_hashes(
     auto const recv_counts = requests.extract_recv_counts();
     auto const recv_buf    = requests.get_recv_buffer();
 
-
     int              rank  = 0;
     int              count = 0;
     std::vector<int> responses;
@@ -354,8 +342,9 @@ std::vector<uint32_t> exchange_hashes(
         }
     }
 
-    // Send back the responses; The number of responses to send back to each rank is exactly the counts we received from them.
-    auto             result = comm.alltoallv(send_buf(responses), send_counts(recv_counts));
+    // Send back the responses; The number of responses to send back to each rank is exactly the counts we received from
+    // them.
+    auto result = comm.alltoallv(send_buf(responses), send_counts(recv_counts));
 
     // Compute starting offsets into the flattened requests vector for each pe
     std::vector<int> offsets(comm.size());
@@ -374,4 +363,3 @@ std::vector<uint32_t> exchange_hashes(
 
     return final_ranks;
 }
-

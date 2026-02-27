@@ -8,8 +8,8 @@ struct Params {
     std::string input_path;
     int         window_size = 10;
     std::string hash;
-    int         p_mod = 100;
-    bool verbose = false;
+    int         p_mod   = 100;
+    bool        verbose = false;
 };
 
 Params read_parameters(int argc, char const* argv[]) {

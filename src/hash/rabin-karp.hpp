@@ -13,7 +13,6 @@ struct rabin_karp {
     uint64_t       num_chars     = 0;
     uint64_t       alphabet_pot;
 
-
     // Compute (a * b) % m without overflow
     uint64_t mul_mod(uint64_t a, uint64_t b, uint64_t m) {
         uint64_t res = 0;
