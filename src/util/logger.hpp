@@ -85,8 +85,7 @@ public:
     static void print_on_root(std::string const& to_print) {
         if (!check_initialized()) return;
         if (comm_ptr->is_root()) {
-            std::print(*out, "PE [{}]: ", comm_ptr->rank());
-            std::print(*out, "{}", to_print);
+            std::print(*out, "PE [{}]: {}\n", comm_ptr->rank(), to_print);
             out->flush();
         }
     }
@@ -123,8 +122,7 @@ public:
             for (auto const o: offsets) {
                 std::string result(strings.begin(), strings.begin() + o);
                 strings.erase(strings.begin(), strings.begin() + o);
-                std::print(*out, "PE [{}]: \n", rank);
-                std::print(*out, "{}\n", result);
+                std::print(*out, "PE [{}]: {}\n", rank, result);
                 ++rank;
             }
             out->flush();

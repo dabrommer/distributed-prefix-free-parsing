@@ -51,7 +51,7 @@ int main(int argc, char const* argv[]) {
 
     auto total_splits = comm.allreduce_single(send_buf(splits.size()), kamping::op(kamping::ops::plus<>()));
 
-    logger::print_all_on_root("Found {} splitters, total splitters: {}\n", splits.size(), total_splits);
+    logger::print_all_on_root("Found {} splitters, total splitters: {}", splits.size(), total_splits);
 
     comm.barrier();
     // Compute phrases
@@ -69,7 +69,7 @@ int main(int argc, char const* argv[]) {
     timer.stop();
 
     bool check = check_sort(sorted_dict, DELIMITER);
-    logger::print_all_on_root("Phrase sorting is correct: {} \n", check);
+    logger::print_all_on_root("Phrase sorting is correct: {}", check);
 
     // Remove duplicates and hash sorted phrases
     timer.synchronize_and_start("Remove duplicates");
@@ -77,10 +77,10 @@ int main(int argc, char const* argv[]) {
     timer.stop();
 
     check = check_sort_unique(sorted_dict, DELIMITER);
-    logger::print_all_on_root("Duplicates removal sorting is correct: {} \n", check);
+    logger::print_all_on_root("Duplicates removal sorting is correct: {}", check);
 
     bool dup_check = check_duplicates(phrase_map);
-    logger::print_all_on_root("Duplicates removal is correct: {} \n", dup_check);
+    logger::print_all_on_root("Duplicates removal is correct: {}", dup_check);
 
     // Globally sort hashes
     timer.synchronize_and_start("Sort hashes");
@@ -96,13 +96,13 @@ int main(int argc, char const* argv[]) {
     timer.stop();
 
     check = check_parsing(final_ranks, params, sorted_dict, comm, DELIMITER);
-    logger::print_all_on_root("Parsing is correct: {} \n", check);
+    logger::print_all_on_root("Parsing is correct: {}", check);
 
 
     int max_rank = std::max(final_ranks.front(), final_ranks.back());
 
     if (params.verbose) {
-        logger::print_on_root("Max Rank: {} \n", max_rank);
+        logger::print_on_root("Max Rank: {}", max_rank);
         logger::print_rank_distribution(final_ranks);
     }
 
@@ -119,7 +119,7 @@ int main(int argc, char const* argv[]) {
     timer.stop();
 
     bool sa_correct = check_sa(values, final_ranks, comm);
-    logger::print_on_root("SA check : {}\n", sa_correct);
+    logger::print_on_root("SA check : {}", sa_correct);
 
     timer.synchronize_and_start("Compute SA and LCP of D");
 
@@ -165,7 +165,7 @@ int main(int argc, char const* argv[]) {
     }
 
     bool t = check_sa(sa_result, dict, comm);
-    logger::print_on_root("SA check for D: {}\n", t);
+    logger::print_on_root("SA check for D: {}", t);
 
     timer.aggregate_and_print(kamping::measurements::SimpleJsonPrinter<>(logger::get_ostream()));
     return 0;
