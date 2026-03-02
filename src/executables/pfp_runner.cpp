@@ -14,7 +14,55 @@
 #include "util/cli_parser.hpp"
 #include "util/logger.hpp"
 
+
 using namespace logs;
+
+std::vector<uint32_t> compute_occ(std::vector<uint32_t>& parse, Communicator<>& comm, size_t max_rank) {
+    std::vector<uint32_t> rank_counts(max_rank, 0);
+    for (auto r: parse) {
+        // final_ranks is 1-based, rank_counts is 0-based
+        rank_counts[r - 1]++;
+    }
+
+    comm.allreduce_inplace(send_recv_buf(rank_counts), op(kamping::ops::plus<>()));
+    return std::move(rank_counts);
+}
+
+std::vector<uint32_t> compute_phrase_prefix_sum(std::vector<unsigned char>& dict, Communicator<>& comm) {
+
+    std::vector<uint32_t> prefix_sum;
+    uint32_t              sum = 0;
+
+    for (auto c: dict) {
+        ++sum;
+        if (c == DELIMITER) {
+            prefix_sum.push_back(sum);
+        }
+    }
+
+    auto local_size = static_cast<uint32_t>(dict.size());
+    auto offset = comm.exscan_single(send_buf(local_size), op(kamping::ops::plus<>{}));
+
+    for (auto& value : prefix_sum) {
+        value += offset;
+    }
+
+    auto global_prefix_sum = comm.allgatherv(send_buf(prefix_sum));
+    return global_prefix_sum;
+}
+
+std::vector<uint32_t> compute_phrase_mapping(std::vector<uint32_t>& phrase_sa, std::vector<uint32_t>& phrase_prefix_sum) {
+    std::vector<uint32_t> mapping(phrase_sa.size(), 0);
+
+    for (size_t i = 0; i < phrase_sa.size(); ++i) {
+        uint32_t sa_value = phrase_sa[i];
+        // Binary search in prefix sum to find the corresponding phrase
+        auto      it       = std::ranges::upper_bound(phrase_prefix_sum, sa_value);
+        size_t    index    = std::distance(phrase_prefix_sum.begin(), it);
+        mapping[i] = static_cast<uint32_t>(index);
+    }
+    return mapping;
+}
 
 int main(int argc, char const* argv[]) {
     kamping::Environment  env;
@@ -41,6 +89,7 @@ int main(int argc, char const* argv[]) {
     auto total_splits = comm.allreduce_single(send_buf(splits.size()), kamping::op(kamping::ops::plus<>()));
     logger::print_all_on_root("Found {} splitters, total splitters: {}", splits.size(), total_splits);
 
+    comm.barrier();
     // Compute phrases
     timer.synchronize_and_start("Compute dict");
     auto parse = compute_dict(splits, data, params, comm);
@@ -85,10 +134,11 @@ int main(int argc, char const* argv[]) {
     check = check_parsing(final_ranks, params, sorted_dict, comm, DELIMITER);
     logger::print_all_on_root("Parsing is correct: {}", check);
 
-    int max_rank = std::max(final_ranks.front(), final_ranks.back());
+    int local_max_rank = std::ranges::max(final_ranks);
+    int global_max_rank = comm.allreduce_single(send_buf(local_max_rank), kamping::op(kamping::ops::max<>()));
 
     if (params.verbose) {
-        logger::print_on_root("Max Rank: {}", max_rank);
+        logger::print_on_root("Max Rank: {}", global_max_rank);
         logger::print_rank_distribution(final_ranks);
     }
 
@@ -104,6 +154,23 @@ int main(int argc, char const* argv[]) {
 
     bool sa_correct = check_sa(values, final_ranks, comm);
     logger::print_on_root("SA check : {}", sa_correct);
+    if (comm.is_root()) {
+        std::cout << "SA check : " << sa_correct << "\n";
+    }
+
+    timer.synchronize_and_start("Compute rank counts");
+    auto phrase_occ = compute_occ(final_ranks, comm, global_max_rank);
+    timer.stop();
+
+    timer.synchronize_and_start("Compute prefix sums");
+    auto phrase_prefixes = compute_phrase_prefix_sum(sorted_dict, comm);
+    timer.stop();
+
+    timer.synchronize_and_start("Compute phrase mapping");
+    auto phrase_mapping = compute_phrase_mapping(values, phrase_prefixes);
+    timer.stop();
+
+    timer.synchronize_and_start("Compute SA and LCP of D");
 
     // Redistribute phrases and get phrases in a std::string which is needed by psac
     timer.synchronize_and_start("Prepare computation of the LCP and SA of D");
