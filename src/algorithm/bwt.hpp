@@ -45,7 +45,6 @@ std::vector<uint32_t> compute_bwt(std::vector<char_type>& parse, Communicator<>&
 
     timer.synchronize_and_start("Compute SA timer");
     auto& sa = get_sa(parse, comm, sa_argc, sa_argv);
-    comm.barrier();
     timer.stop();
 
     timer.synchronize_and_start("BWT timer");
@@ -70,7 +69,8 @@ std::vector<uint32_t> compute_bwt(std::vector<char_type>& parse, Communicator<>&
     for (auto v: sa) {
         auto index = v.u64() - 1;
 
-        auto max_value = offset + sa_size;
+        auto max_value = offset + parse.size();
+
 
         if (index >= offset && index < max_value) {
             // index in local string
@@ -109,6 +109,7 @@ std::vector<uint32_t> compute_bwt(std::vector<char_type>& parse, Communicator<>&
             c = parse[curr - offset];
         }
         response[curr_pe].push_back(c);
+        ++curr_pe_num;
     }
 
     auto                   flatRespView = response | std::ranges::views::join;
@@ -131,6 +132,7 @@ std::vector<uint32_t> compute_bwt(std::vector<char_type>& parse, Communicator<>&
             }
             bwt.push_back(parse[index - 1 - offset]);
         } else {
+            // todo maybe compute prefix sum once
             size_t resp_offset = 0;
             for (int i = 0; i < pe; ++i) {
                 resp_offset += response_counts[i];
