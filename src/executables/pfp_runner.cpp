@@ -1,389 +1,21 @@
-#include "../../external/scalable-distributed-string-sorting/src/executables/sort_caller.cpp"
 #include "../../external/psac/src/sa_lcp_caller.cpp"
-#include <iostream>
-#include <ranges>
+#include "../../external/scalable-distributed-string-sorting/src/executables/sort_caller.cpp"
 #include <vector>
 
 #include "AmsSort/AmsSort.hpp"
-#include "bwt/bwt.hpp"
+#include "algorithm/bwt.hpp"
+#include "algorithm/pfp.hpp"
 #include "checks/check_parsing.hpp"
 #include "checks/check_sa.hpp"
-#include "hash/rabin-karp.hpp"
-#include "kamping/collectives/allreduce.hpp"
-#include "kamping/collectives/gather.hpp"
 #include "kamping/measurements/printer.hpp"
 #include "kamping/measurements/timer.hpp"
-#include "kamping/p2p/recv.hpp"
-#include "kamping/p2p/send.hpp"
-#include "kamping/p2p/sendrecv.hpp"
 #include "mpi/data_distribution.hpp"
 #include "mpi/mpi_utils.hpp"
 #include "util/cli_parser.hpp"
 #include "util/logger.hpp"
-#include "util/dcx_caller.hpp"
-#include "util/pair.hpp"
-#include "DDCX_lib/dss_interface.hpp"
-
-constexpr unsigned char DELIMITER = 0;
-constexpr unsigned char DOLLAR    = 1;
-
-struct Parse {
-    std::vector<unsigned char> dict;
-    std::vector<uint64_t>      hashes;
-};
-
-struct phrase_vector {
-    std::vector<char>   phrases;
-    std::vector<size_t> offsets;
-
-    void insert_phrase(std::vector<char> const& phrase) {
-        offsets.push_back(phrases.size());
-        phrases.insert(phrases.end(), phrase.begin(), phrase.end());
-    }
-
-    explicit phrase_vector(std::vector<std::vector<char>> const& dict_set) {
-        offsets.reserve(dict_set.size());
-        for (auto c_vec: dict_set) {
-            offsets.push_back(c_vec.size());
-            phrases.insert(phrases.end(), c_vec.begin(), c_vec.end());
-        }
-    }
-};
-
-std::vector<int> compute_splitters(std::vector<char>& data, Communicator<>& comm, Params const& params) {
-    rabin_karp       rk(params.window_size);
-    std::vector<int> splits;
-    for (size_t i = 0; i < data.size(); i++) {
-        uint64_t hash = rk.add_char(data[i]);
-
-        if (data[i] == DOLLAR || data[i] == DELIMITER) {
-            std::cout << "Found char " << data[i] << " in data at position " << i << " on PE " << comm.rank_signed() << "\n";
-        }
-
-        // Make sure the window is filled
-        if (i < params.window_size) {
-            continue;
-        }
-
-        if (hash % params.p_mod == 0) {
-            splits.push_back(static_cast<int>(i) - params.window_size);
-        }
-    }
-    return splits;
-}
-
-void update_parse(
-    std::vector<unsigned char>&       dict,
-    rabin_karp&                       rk,
-    std::vector<uint64_t>&            hashes,
-    std::vector<unsigned char> const& phrase
-) {
-    uint64_t const hash = rk.kr_print(phrase);
-    hashes.push_back(hash);
-    dict.insert(dict.end(), phrase.begin(), phrase.end());
-    dict.push_back(DELIMITER);
-}
-
-Parse compute_dict(
-    std::vector<int> const& splits, std::vector<char> const& data, Params const& params, Communicator<>& comm
-) {
-    std::vector<unsigned char> dict;
-    rabin_karp                 kr(params.window_size);
-    std::vector<uint64_t>      hashes;
-    hashes.reserve(splits.size());
-
-    // Prepend $ to the first phrase
-    if (comm.rank_signed() == 0) {
-        std::vector<unsigned char> first_phrase;
-        first_phrase.push_back(DOLLAR);
-        first_phrase.insert(first_phrase.end(), data.begin(), data.begin() + splits[0] + params.window_size);
-        update_parse(dict, kr, hashes, first_phrase);
-
-    }
-
-    // Extract all phrases except the last one (safe loop)
-    for (size_t i = 0; i + 1 < splits.size(); ++i) {
-        auto begin = data.begin() + splits[i];
-        auto end   = data.begin() + splits[i + 1] + params.window_size;
-        update_parse(dict, kr, hashes, std::vector<unsigned char>(begin, end));
-    }
-
-    // Debug for only one PE
-    if (comm.size() == 1) {
-        // Append params.window_size many $ to the last phrase
-        auto                       begin = data.begin() + splits.back();
-        std::vector<unsigned char> last_phrase(begin, data.end());
-        for (int i = 0; i < params.window_size; i++) {
-            last_phrase.push_back(DOLLAR);
-        }
-        update_parse(dict, kr, hashes, last_phrase);
-        return Parse{dict, hashes};
-    }
-
-    // Send the chars before the first splitter to the previous PE
-    int                        first_split = splits.front();
-    std::vector<unsigned char> phrase_to_send(
-        data.begin() + params.window_size - 1,
-        data.begin() + first_split + params.window_size
-    );
-    size_t prev_pe = comm.rank_shifted_cyclic(-1);
-
-    // There is a dummy send recv between PE n and PE 0 to prevent UB caused by the implicit sendrecv done by
-    // kamping::sendrecv Rank n only needs to send to n - 1, but its last phrase needs window_size many $ appended
-    if (comm.rank_signed() == comm.size_signed() - 1) {
-        auto                       begin = data.begin() + splits.back();
-        std::vector<unsigned char> last_phrase(begin, data.end());
-        for (int i = 0; i < params.window_size; i++) {
-            last_phrase.push_back(DOLLAR);
-        }
-
-        // Only send needed
-        comm.sendrecv<unsigned char>(send_buf(phrase_to_send), destination(prev_pe), source(0));
-        update_parse(dict, kr, hashes, last_phrase);
-        return Parse{dict, hashes};
-    }
-
-    int                        last_split = splits.back();
-    std::vector<char>          phrase;
-    size_t                     next_pe = comm.rank_shifted_cyclic(1);
-    std::vector<unsigned char> last_phrase(data.begin() + last_split, data.end());
-
-    // Rank 0 only needs to receive
-    if (comm.rank_signed() == 0) {
-        comm.sendrecv(
-            send_buf(ignore<unsigned char>),
-            destination(prev_pe),
-            source(next_pe),
-            recv_buf<BufferResizePolicy::resize_to_fit>(phrase)
-        );
-    }
-    // All other ranks i send to i - 1 and receive from i + 1
-    else {
-        comm.sendrecv(
-            send_buf(phrase_to_send),
-            destination(prev_pe),
-            recv_buf<BufferResizePolicy::resize_to_fit>(phrase),
-            source(next_pe)
-        );
-    }
-
-    last_phrase.insert(last_phrase.end(), phrase.begin(), phrase.end());
-    update_parse(dict, kr, hashes, last_phrase);
-
-    return Parse{dict, hashes};
-}
-
-std::vector<unsigned char> sort_dict(std::vector<unsigned char>& dict, Communicator<>& comm) {
-    auto result = run_sorter(dict, comm);
-    return result;
-}
-
-std::vector<Pair> remove_duplicates(std::vector<unsigned char>& phrases, Communicator<>& comm, int window_size) {
-    uint64_t          first_hash     = 0;
-    bool              first_hash_set = false;
-    // todo what if the first hash == 0?
-    uint64_t          prev_hash      = 0;
-    uint64_t          hash           = 0;
-    // 1-based ranks are needed (dcx has 0 reserved)
-    int               rank           = 1;
-    std::vector<Pair> sorted_hashes;
-    rabin_karp        rk{window_size};
-    std::vector<unsigned char> curr_phrase;
-    std::vector<unsigned char> unique_phrases;
-
-    for (const unsigned char c: phrases) {
-        // End of phrase
-        if (c == DELIMITER) {
-            // Compute hash for the full phrase
-            hash = rk.kr_print(curr_phrase);
-
-            if (!first_hash_set) {
-                first_hash     = hash;
-                first_hash_set = true;
-                prev_hash      = hash;
-                sorted_hashes.emplace_back(hash, rank);
-                ++rank;
-                unique_phrases.insert(
-                        unique_phrases.end(),
-                        curr_phrase.begin(),
-                        curr_phrase.end()
-                );
-                unique_phrases.push_back(DELIMITER);
-            } else if (hash != prev_hash) {
-                sorted_hashes.emplace_back(hash, rank);
-                prev_hash = hash;
-                ++rank;
-                unique_phrases.insert(
-                        unique_phrases.end(),
-                        curr_phrase.begin(),
-                        curr_phrase.end()
-                );
-                unique_phrases.push_back(DELIMITER);
-            }
-            curr_phrase.clear();
-            rk.reset();
-            hash = 0;
-        } else {
-            curr_phrase.push_back(c);
-        }
-    }
-    phrases.swap(unique_phrases);
-
-    // Exchange last hashes to remove duplicates across PEs
-    // Each PE sends its last hash to the next PE and compares it to its first hash
-
-    // Check if the first hash has been deleted, as this will change the ranks for all other hashes
-    int erased = 0;
-
-    if (comm.size() > 1) {
-        auto next_pe = comm.rank_shifted_cyclic(1);
-        auto prev_pe = comm.rank_shifted_cyclic(-1);
-        auto res     = comm.sendrecv<uint64_t>(send_buf(prev_hash), destination(next_pe), source(prev_pe));
-        if (res.front() == first_hash) {
-            // Erase the first hash and the first phrase
-            sorted_hashes.erase(sorted_hashes.begin());
-            for (int i = 0; i < phrases.size(); ++i) {
-                if (phrases[i] == DELIMITER) {
-                    phrases.erase(phrases.begin(), phrases.begin() + i + 1);
-                    break;
-                }
-            }
-            erased = 1;
-        }
-    }
-
-    // Compute offset for global ranks
-    auto  size   = sorted_hashes.size();
-    auto offset = static_cast<int>(comm.exscan_single(send_buf(size), op(kamping::ops::plus<>())));
-
-    if (offset != 0) {
-        // Update local ranks to global ranks
-        for (auto& p: sorted_hashes) {
-            p.rank += offset - erased;
-        }
-    }
-    return sorted_hashes;
-}
-
-MPI_Datatype create_pair_type() {
-    MPI_Datatype pair_type;
-
-    int blocklengths[2] = {1, 1};
-
-    MPI_Datatype types[2] = {MPI_UINT64_T, MPI_INT};
-    MPI_Aint     displacements[2];
-    displacements[0] = offsetof(Pair, hash);
-    displacements[1] = offsetof(Pair, rank);
-
-    MPI_Type_create_struct(2, blocklengths, displacements, types, &pair_type);
-    MPI_Type_commit(&pair_type);
-
-    return pair_type;
-}
-
-std::pair<std::unordered_map<uint64_t, int>, uint64_t>
-sort_hashes(std::vector<Pair>& hash_vec, Communicator<>& comm) {
-    int const kway      = 64;
-    auto      pair_comp = [](Pair const& a, Pair const& b) {
-        return a.hash < b.hash;
-    };
-    std::random_device rd;
-    std::mt19937_64    gen(rd());
-
-    Ams::sort(create_pair_type(), hash_vec, kway, gen, comm.mpi_communicator(), pair_comp);
-
-    bool check = check_sort_unique_global(hash_vec, comm);
-    if (!check) {
-        std::cout << "Error: PE " << comm.rank_signed() << " found sorting error in global hash sort\n";
-    }
-
-    std::unordered_map<uint64_t, int> map;
-    for (auto const& p: hash_vec) {
-        map.insert({p.hash, p.rank});
-    }
-
-    if (hash_vec.empty()) {
-        // todo: fix this edge case
-        std::cout << "Error: PE " << comm.rank_signed() << " has an empty hash vector after sorting\n";
-        exit(1);
-    }
-    return {map, hash_vec.back().hash};
-}
 
 
-std::vector<uint32_t> exchange_hashes(
-    std::unordered_map<uint64_t, int>& hash_map,
-    std::vector<uint64_t> const&       hashes,
-    uint64_t                           last_hash,
-    Communicator<> const&              comm
-) {
-    auto                               border_hashes = comm.allgather(send_buf(last_hash));
-    std::vector<std::vector<uint64_t>> hashes_to_request(comm.size());
-    std::vector<int>                   pe_order;
-    for (auto const& h: hashes) {
-        auto const it = std::ranges::lower_bound(border_hashes, h);
-        auto const dist = std::distance(border_hashes.begin(), it);
-
-        auto pe = static_cast<size_t>(dist);
-        if (pe >= border_hashes.size()) {
-            pe = border_hashes.size() - 1;
-        }
-        hashes_to_request[pe].push_back(h);
-        pe_order.push_back(static_cast<int>(pe));
-    }
-
-    // Compute size_v for alltoallv
-    std::vector<int> size_v;
-    for (auto const& vec: hashes_to_request) {
-        size_v.push_back(vec.size());
-    }
-    // Flatten the request vector
-    auto                  flat_requests = hashes_to_request | std::views::join;
-    std::vector<uint64_t> flat_hashes(flat_requests.begin(), flat_requests.end());
-
-    auto requests = comm.alltoallv(send_buf(flat_hashes), send_counts(size_v), recv_counts_out());
-
-    auto const recv_counts = requests.extract_recv_counts();
-    auto const recv_buf    = requests.get_recv_buffer();
-
-
-    int              rank  = 0;
-    int              count = 0;
-    std::vector<int> responses;
-    // Build responses in the same order as recv_buf
-    responses.reserve(recv_buf.size());
-    for (auto const& hash: recv_buf) {
-        auto it = hash_map.find(hash);
-        if (it != hash_map.end()) {
-            responses.push_back(it->second);
-        } else {
-            // Requested hash not found in the local hash map
-            std::cout << "Error: PE " << comm.rank_signed() << " did not find hash " << hash << " in its local map\n";
-            // todo clean exit
-            exit(1);
-        }
-    }
-
-    // Send back the responses; The number of responses to send back to each rank is exactly the counts we received from them.
-    auto             result = comm.alltoallv(send_buf(responses), send_counts(recv_counts));
-
-    // Compute starting offsets into the flattened requests vector for each pe
-    std::vector<int> offsets(comm.size());
-    int              off = 0;
-    for (size_t peer = 0; peer < hashes_to_request.size(); ++peer) {
-        offsets[peer] = off;
-        off += static_cast<int>(hashes_to_request[peer].size());
-    }
-    std::vector<uint32_t> final_ranks;
-    final_ranks.reserve(pe_order.size());
-    for (auto i: pe_order) {
-        int curr_rank = result[offsets[i]];
-        final_ranks.push_back(curr_rank);
-        offsets[i]++;
-    }
-
-    return final_ranks;
-}
+using namespace logs;
 
 std::vector<uint32_t> compute_occ(std::vector<uint32_t>& parse, Communicator<>& comm, size_t max_rank) {
     std::vector<uint32_t> rank_counts(max_rank, 0);
@@ -440,7 +72,7 @@ int main(int argc, char const* argv[]) {
 
     std::string out_name = params.input_path + "_n_" + std::to_string(comm.size()) + "_w_"
                            + std::to_string(params.window_size) + "_p_" + std::to_string(params.p_mod) + ".txt";
-    logs::printer printer(out_name);
+    logger::set_comm(comm, out_name);
 
     auto& timer = kamping::measurements::timer();
 
@@ -455,11 +87,7 @@ int main(int argc, char const* argv[]) {
     timer.stop();
 
     auto total_splits = comm.allreduce_single(send_buf(splits.size()), kamping::op(kamping::ops::plus<>()));
-
-
-    std::cout << "PE " << comm.rank_signed() << " found " << splits.size() << " splitters, total splitters: " << total_splits
-              << "\n";
-
+    logger::print_all_on_root("Found {} splitters, total splitters: {}", splits.size(), total_splits);
 
     comm.barrier();
     // Compute phrases
@@ -477,7 +105,7 @@ int main(int argc, char const* argv[]) {
     timer.stop();
 
     bool check = check_sort(sorted_dict, DELIMITER);
-    printer.print_all_on_root(std::format("Phrase sorting is correct: {} \n", check), comm);
+    logger::print_all_on_root("Phrase sorting is correct: {}", check);
 
     // Remove duplicates and hash sorted phrases
     timer.synchronize_and_start("Remove duplicates");
@@ -485,10 +113,10 @@ int main(int argc, char const* argv[]) {
     timer.stop();
 
     check = check_sort_unique(sorted_dict, DELIMITER);
-    printer.print_all_on_root(std::format("Duplicates removal sorting is correct: {} \n", check), comm);
+    logger::print_all_on_root("Duplicates removal sorting is correct: {}", check);
 
     bool dup_check = check_duplicates(phrase_map);
-    printer.print_all_on_root(std::format("Duplicates removal is correct: {} \n", dup_check), comm);
+    logger::print_all_on_root("Duplicates removal is correct: {}", dup_check);
 
     // Globally sort hashes
     timer.synchronize_and_start("Sort hashes");
@@ -504,30 +132,28 @@ int main(int argc, char const* argv[]) {
     timer.stop();
 
     check = check_parsing(final_ranks, params, sorted_dict, comm, DELIMITER);
-    printer.print_all_on_root(std::format("Parsing is correct: {} \n", check), comm);
-
+    logger::print_all_on_root("Parsing is correct: {}", check);
 
     int local_max_rank = std::ranges::max(final_ranks);
     int global_max_rank = comm.allreduce_single(send_buf(local_max_rank), kamping::op(kamping::ops::max<>()));
 
     if (params.verbose) {
-        printer.print_on_root(std::format("Max Rank: {} \n", global_max_rank), comm);
-        printer.print_rank_distribution(final_ranks, comm);
+        logger::print_on_root("Max Rank: {}", global_max_rank);
+        logger::print_rank_distribution(final_ranks);
     }
 
+    // Compute BWT of P
+    timer.synchronize_and_start("Redistribute parse");
     // todo bwt needs redistribution for correct sa_index <-> pe computation, this can be fixed
-    auto total_rank_size = comm.allreduce_single(send_buf(final_ranks.size()), kamping::op(kamping::ops::plus<>()));
-    auto rank_slice_size = total_rank_size / comm.size();
-    auto rank_res_size = total_rank_size % comm.size();
+    auto ranks_out = redistribute_block_balanced(final_ranks, comm);
+    timer.stop();
 
-    auto rank_local_target_size = rank_slice_size + (comm.rank() < rank_res_size ? 1 : 0);
-    auto ranks_out = distribute_data_custom(final_ranks, rank_local_target_size, comm);
-
-    timer.synchronize_and_start("Compute SA of P");
+    timer.synchronize_and_start("Compute BWT of P");
     auto values = compute_bwt(ranks_out, comm);
     timer.stop();
 
     bool sa_correct = check_sa(values, final_ranks, comm);
+    logger::print_on_root("SA check : {}", sa_correct);
     if (comm.is_root()) {
         std::cout << "SA check : " << sa_correct << "\n";
     }
@@ -546,53 +172,29 @@ int main(int argc, char const* argv[]) {
 
     timer.synchronize_and_start("Compute SA and LCP of D");
 
-    // psac requires a correct block distribution of the input data
+    // Redistribute phrases and get phrases in a std::string which is needed by psac
+    timer.synchronize_and_start("Prepare computation of the LCP and SA of D");
+    auto out                                        = redistribute_block_balanced(sorted_dict, comm);
+    auto [sorted_dict_string, last_char_per_phrase] = convert_dict_to_string(out, params.window_size);
+    timer.stop();
 
-    auto total_dict_size = comm.allreduce_single(send_buf(sorted_dict.size()), kamping::op(kamping::ops::plus<>()));
-
-    auto slice_size = total_dict_size / comm.size();
-    auto res_size = total_dict_size % comm.size();
-
-    auto local_target_size = slice_size + (comm.rank() < res_size ? 1 : 0);
-
-
-    auto out = distribute_data_custom(sorted_dict, local_target_size, comm);
-
-    std::vector<unsigned char> last_char_per_phrase;
-
-    std::string sorted_dict_string;
-    for (int i = 0; i < out.size(); ++i) {
-        char c = out[i];
-        if (c == DELIMITER) {
-            sorted_dict_string.push_back(DELIMITER + 1);
-            // Store the last char of each phrase
-            last_char_per_phrase.push_back(out[i - params.window_size]);
-        } else if (c == DOLLAR) {
-            sorted_dict_string.push_back(DOLLAR + 1);
-        } else {
-            sorted_dict_string.push_back(static_cast<char>(c));
-        }
-    }
-
-
+    timer.synchronize_and_start("Compute LCP and SA of D");
     auto sa = sa_builder();
     sa.construct_sa_lcp(comm.mpi_communicator(), sorted_dict_string);
 
-    auto& sa_result = sa.get_sa();
+    auto& sa_result  = sa.get_sa();
     auto& lcp_result = sa.get_lcp();
-
+    timer.stop();
 
     std::vector<unsigned char> dict;
-    for (auto c : sorted_dict_string) {
+    for (auto c: sorted_dict_string) {
         dict.push_back(static_cast<unsigned char>(c));
     }
 
     bool t = check_sa(sa_result, dict, comm);
-    if (comm.is_root()) {
-        std::cout << "SA check for D: " << t << "\n";
-    }
+    logger::print_on_root("SA check for D: {}", t);
 
-    timer.aggregate_and_print(kamping::measurements::SimpleJsonPrinter<>(printer.get_ostream()));
+    timer.aggregate_and_print(kamping::measurements::SimpleJsonPrinter<>(logger::get_ostream()));
+
     return 0;
-
 }

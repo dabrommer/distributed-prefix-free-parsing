@@ -1,13 +1,15 @@
 #pragma once
 
-#include <iostream>
 #include <vector>
 
 #include "kamping/communicator.hpp"
 #include "util/cli_parser.hpp"
+#include "util/logger.hpp"
 #include "util/pair.hpp"
 
-bool check_sort_unique(std::vector<unsigned char> const& to_check, const unsigned char DELIMITER) {
+using namespace logs;
+
+bool check_sort_unique(std::vector<unsigned char> const& to_check, unsigned char const DELIMITER) {
     std::string prev;
     std::string curr;
 
@@ -16,11 +18,11 @@ bool check_sort_unique(std::vector<unsigned char> const& to_check, const unsigne
         if (c == DELIMITER) {
             int check = curr.compare(prev);
             if (check < 0) {
-                std::cout << "Sorting check failed: '" << curr << "' is less than previous phrase '" << prev << "'\n";
+                logger::print_on_root("Sorting check failed: '{}' is less than previous phrase '{}'", curr, prev);
                 return false;
             }
             if (check == 0) {
-                std::cout << "Duplicate phrase found: '" << curr << "'\n";
+                logger::print_on_root("Duplicate phrase found: '{}'", curr);
                 return false;
             }
             prev = curr;
@@ -30,33 +32,36 @@ bool check_sort_unique(std::vector<unsigned char> const& to_check, const unsigne
     return true;
 }
 
-
-inline bool check_parsing(std::vector<uint32_t> const& ranks, Params const& params, std::vector<unsigned char> const& phrases, kamping::Communicator<>& comm, const unsigned char DELIMITER) {
-
-    auto ranks_complete = comm.gatherv(kamping::send_buf(ranks));
+inline bool check_parsing(
+    std::vector<uint32_t> const&      ranks,
+    Params const&                     params,
+    std::vector<unsigned char> const& phrases,
+    kamping::Communicator<>&          comm,
+    unsigned char const               DELIMITER
+) {
+    auto ranks_complete   = comm.gatherv(kamping::send_buf(ranks));
     auto phrases_complete = comm.gatherv(kamping::send_buf(phrases));
 
     if (!comm.is_root()) {
         return true;
     }
 
-
     bool sorted = check_sort_unique(phrases_complete, DELIMITER);
     if (!sorted) {
-        std::cout << "check_parsing: phrases are not sorted or contain duplicates\n";
+        logger::print_on_root("check_parsing: phrases are not sorted or contain duplicates");
         return false;
     }
 
     std::ifstream file(params.input_path, std::ios::binary);
     if (!file) {
-        std::cerr << "Failed to open input file '" << params.input_path << "' for checking\n";
+        logger::print_on_root("Failed to open input file '{}' for checking", params.input_path);
         return false;
     }
     std::vector<char> file_data((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
 
     std::vector<std::string> all_phrases;
-    std::string curr_str;
-    for (const auto& c : phrases_complete) {
+    std::string              curr_str;
+    for (auto const& c: phrases_complete) {
         if (c == DELIMITER) {
             all_phrases.push_back(curr_str);
             curr_str.clear();
@@ -65,16 +70,16 @@ inline bool check_parsing(std::vector<uint32_t> const& ranks, Params const& para
         }
     }
 
-    std::size_t matches = 0;
-    std::size_t missmatches = 0;
-    bool correct = true;
-    std::size_t index = 0;
-    bool first_phrase = true;
+    std::size_t matches      = 0;
+    std::size_t missmatches  = 0;
+    bool        correct      = true;
+    std::size_t index        = 0;
+    bool        first_phrase = true;
 
-    for (int rank : ranks_complete) {
+    for (int rank: ranks_complete) {
         // Rank is 1-based
         if (rank < 1 || static_cast<std::size_t>(rank - 1) >= all_phrases.size()) {
-            std::cerr << "check_parsing: invalid rank " << rank << " (phrases size=" << all_phrases.size() << ")\n";
+            logger::print_on_root("check_parsing: invalid rank {} (phrases size={})", rank, all_phrases.size());
             return false;
         }
 
@@ -89,14 +94,17 @@ inline bool check_parsing(std::vector<uint32_t> const& ranks, Params const& para
         auto comp_len = expected_phrase.size() - params.window_size;
 
         if (index + comp_len > file_data.size()) {
-            std::cout << "check_parsing: file buffer too small for reconstructed phrases (needed " << (index + comp_len)
-                      << ", have " << file_data.size() << ")\n";
+            logger::print_on_root(
+                "check_parsing: file buffer too small for reconstructed phrases (needed {}, have {})",
+                (index + comp_len),
+                file_data.size()
+            );
             return false;
         }
 
         for (size_t k = 0; k < comp_len; ++k) {
             char expected_c = expected_phrase[k];
-            char file_c = file_data[index];
+            char file_c     = file_data[index];
             if (file_c == expected_c) {
                 ++matches;
             } else {
@@ -107,28 +115,39 @@ inline bool check_parsing(std::vector<uint32_t> const& ranks, Params const& para
         }
     }
 
-    std::cout << "Total matches: " << matches << ", total mismatches: " << missmatches << "\n";
+    logger::print_on_root("Total matches: {}, total mismatches: {}", matches, missmatches);
     return correct;
 }
-
 
 bool check_duplicates(std::vector<Pair> const& hash_pairs) {
     for (size_t i = 1; i < hash_pairs.size(); ++i) {
         if (hash_pairs[i].hash == hash_pairs[i - 1].hash) {
-            std::cout << "Duplicate hash found at indices " << (i - 1) << " and " << i << ": hash=" << hash_pairs[i].hash
-                      << ", ranks=" << hash_pairs[i - 1].rank << " and " << hash_pairs[i].rank << "\n";
+            logger::print_on_root(
+                "Duplicate hash found at indices {} and {}: hash={}, ranks={} and {}",
+                (i - 1),
+                i,
+                hash_pairs[i].hash,
+                hash_pairs[i - 1].rank,
+                hash_pairs[i].rank
+            );
             return false;
         }
         if (hash_pairs[i].rank != hash_pairs[i - 1].rank + 1) {
-            std::cout << "Non-consecutive ranks found at indices " << (i - 1) << " and " << i << ": hash=" << hash_pairs[i].hash
-                      << ", ranks=" << hash_pairs[i - 1].rank << " and " << hash_pairs[i].rank << "\n";
+            logger::print_on_root(
+                "Non-consecutive ranks found at indices {} and {}: hash={}, ranks={} and {}",
+                (i - 1),
+                i,
+                hash_pairs[i].hash,
+                hash_pairs[i - 1].rank,
+                hash_pairs[i].rank
+            );
             return false;
         }
     }
     return true;
 }
 
-bool check_sort(std::vector<unsigned char> const& to_check, const unsigned char DELIMITER) {
+bool check_sort(std::vector<unsigned char> const& to_check, unsigned char const DELIMITER) {
     std::string prev;
     std::string curr;
 
@@ -137,7 +156,7 @@ bool check_sort(std::vector<unsigned char> const& to_check, const unsigned char 
         if (c == DELIMITER) {
             int check = curr.compare(prev);
             if (check < 0) {
-                std::cout << "Sorting check failed: '" << curr << "' is less than previous phrase '" << prev << "'\n";
+                logger::print_on_root("Sorting check failed: '{}' is less than previous phrase '{}'", curr, prev);
                 return false;
             }
             prev = curr;
@@ -157,17 +176,24 @@ bool check_sort_unique_global(std::vector<Pair> const& to_check, kamping::Commun
 
     for (auto const pair: pairs) {
         if (prev_hash > pair.hash) {
-            std::cout << "Global sorting check failed: hash " << pair.hash << " is less than previous hash " << prev_hash
-                      << ", rank=" << pair.rank << "\n";
+            logger::print_on_root(
+                "Global sorting check failed: hash {} is less than previous hash {}, rank={}",
+                pair.hash,
+                prev_hash,
+                pair.rank
+            );
             return false;
         }
         if (prev_hash == pair.hash) {
-            std::cout << "Global sorting check failed: duplicate hash " << pair.hash << " found with ranks " << pair.rank
-                      << " and " << (pair.rank - 1) << "\n";
+            logger::print_on_root(
+                "Global sorting check failed: duplicate hash {} found with ranks {} and {}",
+                pair.hash,
+                pair.rank,
+                (pair.rank - 1)
+            );
             return false;
         }
         prev_hash = pair.hash;
     }
     return true;
 }
-
