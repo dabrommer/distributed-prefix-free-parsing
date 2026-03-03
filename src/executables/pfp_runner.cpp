@@ -9,6 +9,7 @@
 #include "checks/check_sa.hpp"
 #include "kamping/measurements/printer.hpp"
 #include "kamping/measurements/timer.hpp"
+#include "kamping/collectives/scan.hpp"
 #include "mpi/data_distribution.hpp"
 #include "mpi/mpi_utils.hpp"
 #include "mpi/request_response.hpp"
@@ -21,7 +22,7 @@ using namespace logs;
 std::vector<uint32_t> compute_occ(std::vector<uint32_t>& parse, Communicator<>& comm, size_t max_rank) {
     std::vector<uint32_t> rank_counts(max_rank, 0);
     for (auto r: parse) {
-        // final_ranks is 1-based, rank_counts is 0-based
+        // parse is 1-based, rank_counts is 0-based
         rank_counts[r - 1]++;
     }
 
@@ -52,7 +53,7 @@ std::vector<uint32_t> compute_phrase_prefix_sum(std::vector<unsigned char>& dict
     return global_prefix_sum;
 }
 
-std::vector<uint32_t> compute_phrase_mapping(std::vector<uint32_t>& phrase_sa, std::vector<uint32_t>& phrase_prefix_sum) {
+std::vector<uint32_t> compute_phrase_mapping(std::vector<uint64_t>& phrase_sa, std::vector<uint32_t>& phrase_prefix_sum) {
     std::vector<uint32_t> mapping(phrase_sa.size(), 0);
 
     for (size_t i = 0; i < phrase_sa.size(); ++i) {
@@ -97,6 +98,7 @@ std::vector<uint32_t> suffix_to_phrase_lens(std::vector<uint64_t>& suffixes, std
     for (auto suffix: suffixes) {
         auto it = std::ranges::lower_bound(phrase_borders, suffix);
         size_t index = std::distance(phrase_borders.begin(), it);
+        pe_order.push_back(static_cast<int>(index));
         if (index == comm.rank_signed()) {
 
         }
@@ -128,11 +130,11 @@ std::vector<unsigned char> get_prev_chars(std::vector<unsigned char>& phrases, s
 
 }
 
-std::vector<uint32_t> solve_hard_cases(std::span<std::pair<uint64_t, uint32_t>> hard_chars, std::vector<uint32_t>& parse) {
-
+std::vector<uint32_t>
+solve_hard_cases(std::span<std::pair<uint64_t, uint32_t>> hard_chars, std::vector<uint32_t>& parse) {
     std::set<uint32_t> phrase_ids;
-    for (auto& pair : hard_chars) {
-        auto phrase_id = pair.second ;
+    for (auto& pair: hard_chars) {
+        auto phrase_id = pair.second;
         phrase_ids.insert(phrase_id);
     }
 
@@ -145,28 +147,56 @@ std::vector<uint32_t> solve_hard_cases(std::span<std::pair<uint64_t, uint32_t>> 
         }
     }
     // Sort the positions based on the suffixes starting at these positions in descending order
-    std::ranges::sort(id_positions,
-            [&](size_t a, size_t b) {
-                size_t len_a = parse.size() - a;
-                size_t len_b = parse.size() - b;
-                size_t common = std::min(len_a, len_b);
-                // k = 1 to skip the phrase_id itself
-                for (size_t k = 1; k < common; ++k) {
-                    if (parse[a + k] != parse[b + k]) {
-                        return parse[a + k] > parse[b + k]; // descending
-                    }
-                }
-                // one suffix is a prefix of the other: shorter is smaller, so longer comes first
-                return len_a > len_b;
-            });
+    std::ranges::sort(id_positions, [&](size_t a, size_t b) {
+        size_t len_a  = parse.size() - a;
+        size_t len_b  = parse.size() - b;
+        size_t common = std::min(len_a, len_b);
+        // k = 1 to skip the phrase_id itself
+        for (size_t k = 1; k < common; ++k) {
+            if (parse[a + k] != parse[b + k]) {
+                return parse[a + k] > parse[b + k]; // descending
+            }
+        }
+        // one suffix is a prefix of the other: shorter is smaller, so longer comes first
+        return len_a > len_b;
+    });
 
-
-
-     return id_positions;
-
-
+    return id_positions;
 }
 
+std::vector<std::vector<uint32_t>> compute_inverted_list(
+    std::vector<uint32_t> const&      parse_bwt,
+    std::vector<unsigned char> const& phrases,
+    int                               max_rank,
+    Communicator<>&                   comm
+) {
+    size_t local_size    = parse_bwt.size();
+
+    std::vector<std::vector<uint32_t>> inverted_list(max_rank);
+    for (size_t i = 0; i < parse_bwt.size(); ++i) {
+        auto phrase_id = parse_bwt[i];
+        inverted_list[phrase_id].push_back(i);
+    }
+
+    for (int phrase_id = 0; phrase_id < max_rank; ++phrase_id) {
+        auto global_list         = comm.allgatherv(send_buf(inverted_list[phrase_id]));
+        inverted_list[phrase_id] = std::move(global_list);
+    }
+
+    return inverted_list;
+}
+std::vector<unsigned char> permutate_last_chars(const std::vector<uint32_t>& parse_bwt, const std::vector<unsigned char>& last_char_per_phrase, const Communicator<std::vector>& comm) {
+    // todo this is not efficient
+    auto all_last_chars = comm.allgather(send_buf(last_char_per_phrase));
+
+    std::vector<unsigned char> permutated_last_chars(parse_bwt.size());
+    for (size_t i = 0; i < parse_bwt.size(); ++i) {
+        auto phrase_id = parse_bwt[i];
+        permutated_last_chars[i] = all_last_chars[phrase_id];
+    }
+    return permutated_last_chars;
+
+}
 int main(int argc, char const* argv[]) {
     kamping::Environment  env;
     kamping::Communicator comm;
@@ -245,27 +275,6 @@ int main(int argc, char const* argv[]) {
         logger::print_rank_distribution(final_ranks);
     }
 
-    // Compute BWT of P
-    timer.synchronize_and_start("Redistribute parse");
-    // todo bwt needs redistribution for correct sa_index <-> pe computation, this can be fixed
-    auto ranks_out = redistribute_block_balanced(final_ranks, comm);
-    timer.stop();
-
-    timer.synchronize_and_start("Compute BWT of P");
-    auto values = compute_bwt(ranks_out, comm);
-    timer.stop();
-
-    timer.synchronize_and_start("Compute rank counts");
-    auto phrase_occ = compute_occ(final_ranks, comm, global_max_rank);
-    timer.stop();
-
-    timer.synchronize_and_start("Compute prefix sums");
-    auto phrase_prefixes = compute_phrase_prefix_sum(sorted_dict, comm);
-    timer.stop();
-
-    timer.synchronize_and_start("Compute phrase mapping");
-    auto phrase_mapping = compute_phrase_mapping(values, phrase_prefixes);
-    timer.stop();
 
     timer.synchronize_and_start("Compute SA and LCP of D");
 
@@ -288,20 +297,54 @@ int main(int argc, char const* argv[]) {
         dict.push_back(static_cast<unsigned char>(c));
     }
 
-    bool t = check_sa(sa_result, dict, comm);
-    logger::print_on_root("SA check for D: {}", t);
+    timer.synchronize_and_start("Compute rank counts");
+    auto phrase_occ = compute_occ(final_ranks, comm, global_max_rank);
+    timer.stop();
+
+    timer.synchronize_and_start("Compute prefix sums");
+    auto phrase_prefixes = compute_phrase_prefix_sum(sorted_dict, comm);
+    timer.stop();
+
+    timer.synchronize_and_start("Compute phrase mapping");
+    auto phrase_mapping = compute_phrase_mapping(sa_result, phrase_prefixes);
+    timer.stop();
+
+    // Compute BWT of P
+    timer.synchronize_and_start("Redistribute parse");
+    // todo bwt needs redistribution for correct sa_index <-> pe computation, this can be fixed
+    auto ranks_out = redistribute_block_balanced(final_ranks, comm);
+    timer.stop();
+
+    timer.synchronize_and_start("Compute BWT of P");
+    auto parse_bwt = compute_bwt(ranks_out, comm);
+    timer.stop();
+
+    timer.synchronize_and_start("Compute inverted list of the BWT of P");
+    auto inverted_list = compute_inverted_list(parse_bwt, out, global_max_rank, comm);
+    timer.stop();
+
+    /*bool t = check_sa(sa_result, dict, comm);
+    logger::print_on_root("SA check for D: {}", t);*/
 
     timer.synchronize_and_start("Compute phrase suffix lengths");
     auto phrase_offsets = comm.exscan_single(send_buf(out.size()), op(kamping::ops::plus<>()));
-    auto suffix_lens = suffix_to_phrase_lens(sa_result, phrase_prefixes, comm, out, phrase_offsets);
+    auto local_phrase_prefix_sum = comm.scan(send_buf(static_cast<uint32_t>(out.size())), op(kamping::ops::plus<>()));
+    auto global_phrase_prefix_sum = comm.allgather(send_buf(local_phrase_prefix_sum));
+    std::cout << "Phrase prefix sum size: " << global_phrase_prefix_sum.size() << std::endl;
+    auto suffix_lens = suffix_to_phrase_lens(sa_result, global_phrase_prefix_sum, comm, out, phrase_offsets);
     timer.stop();
+
+    timer.synchronize_and_start("Permutate the W array");
+    auto w_array = permutate_last_chars(parse_bwt, last_char_per_phrase, comm);
+    timer.stop();
+
 
     // Main loop to construct the BWT
     std::vector<unsigned char> bwt;
     bwt.reserve(sa_result.size());
 
     // todo this does not scale
-    auto global_parse = comm.alltoallv(send_buf(ranks_out));
+    auto global_parse = comm.allgatherv(send_buf(ranks_out));
 
     // This vector indicates how many times a char has to be inserted at which position. (position, size)
     std::vector<std::pair<size_t, size_t>> prev_chars_pos;
@@ -335,10 +378,13 @@ int main(int argc, char const* argv[]) {
         }
         if (suffix_phrase.second) {
             // Suffix is the first char of a phrase
-            // Store chars and their starting pos in the bwt
-            // todo add elements to first_chars
-            // auto pre_chars = get_chars_before_phrase(suffix_phrase, dict, comm);
-            //bwt_pos += pre_chars.size();
+            // The inverted list stores the positions of the preceding phrases in correct order.
+            // The actual chars are retrieved from the permutated W array
+            auto& inverted_list_index = inverted_list[suffix_phrase.first];
+                for (auto pos: inverted_list_index) {
+                    bwt.push_back(w_array[pos]);
+                    bwt_pos++;
+                }
             hard_chars_open = false;
             continue;
         }
