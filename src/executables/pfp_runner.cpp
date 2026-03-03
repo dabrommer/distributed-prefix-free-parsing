@@ -111,7 +111,7 @@ std::vector<uint32_t> suffix_to_phrase_lens(std::vector<uint64_t>& suffixes, std
     }, pe_order, comm );
 }
 
-std::vector<unsigned char> get_prev_chars(std::vector<unsigned char>& phrases, std::vector<std::pair<uint32_t, uint32_t>>& prev_chars, std::vector<uint32_t>& phrase_prerfix_sum, Communicator<>& comm) {
+std::vector<unsigned char> get_prev_chars(std::vector<unsigned char>& phrases, std::vector<std::pair<uint32_t, uint64_t>>& prev_chars, std::vector<uint32_t>& phrase_prerfix_sum, Communicator<>& comm) {
     std::vector<std::vector<uint32_t>> requests(phrase_prerfix_sum.size());
     std::vector<int> pe_order;
     for (auto& [phrase_id, suffix]: prev_chars) {
@@ -125,6 +125,45 @@ std::vector<unsigned char> get_prev_chars(std::vector<unsigned char>& phrases, s
     return request_response(requests, [&](uint32_t suffix) -> unsigned char {
         return phrases[suffix - 1];
     }, pe_order, comm);
+
+}
+
+std::vector<uint32_t> solve_hard_cases(std::span<std::pair<uint64_t, uint32_t>> hard_chars, std::vector<uint32_t>& parse) {
+
+    std::set<uint32_t> phrase_ids;
+    for (auto& pair : hard_chars) {
+        auto phrase_id = pair.second ;
+        phrase_ids.insert(phrase_id);
+    }
+
+    std::vector<uint32_t> id_positions;
+    // Collect all positions where the hard char's  phrases occur
+    for (size_t i = 0; i < parse.size(); ++i) {
+        auto phrase_id = parse[i];
+        if (phrase_ids.contains(phrase_id)) {
+            id_positions.push_back(i);
+        }
+    }
+    // Sort the positions based on the suffixes starting at these positions in descending order
+    std::ranges::sort(id_positions,
+            [&](size_t a, size_t b) {
+                size_t len_a = parse.size() - a;
+                size_t len_b = parse.size() - b;
+                size_t common = std::min(len_a, len_b);
+                // k = 1 to skip the phrase_id itself
+                for (size_t k = 1; k < common; ++k) {
+                    if (parse[a + k] != parse[b + k]) {
+                        return parse[a + k] > parse[b + k]; // descending
+                    }
+                }
+                // one suffix is a prefix of the other: shorter is smaller, so longer comes first
+                return len_a > len_b;
+            });
+
+
+
+     return id_positions;
+
 
 }
 
@@ -261,12 +300,29 @@ int main(int argc, char const* argv[]) {
     std::vector<unsigned char> bwt;
     bwt.reserve(sa_result.size());
 
+    // todo this does not scale
+    auto global_parse = comm.alltoallv(send_buf(ranks_out));
+
     // This vector indicates how many times a char has to be inserted at which position. (position, size)
     std::vector<std::pair<size_t, size_t>> prev_chars_pos;
     // This vector stores the prev chars needed to be requested (phrase_id, suffix)
-    std::vector<std::pair<uint32_t, uint32_t>> prev_chars;
+    std::vector<std::pair<uint32_t, uint64_t>> prev_chars;
+    // Store which suffix index in which phrase is a hard char (sa index, phrase_id)
+    std::vector<std::pair<uint64_t, uint32_t>> hard_chars;
+    // Store the index at which the hard chars should be inserted in the bwt
+    std::vector<uint32_t> hard_chars_idx;
+    // Store how many hard cases compete for the same position in the bwt
+    // The mapping is hard_chars_len[i] with sum x = hard_chars_len[0 ... i-1]
+    // -> hard_chars[x] ... hard_chars[x + hard_chars_len[i]] compete for the same position hard_chars_idx[i] in the bwt
+    std::vector<uint32_t> hard_chars_len;
+    bool hard_chars_open = false;
     size_t bwt_pos = 0;
-    for (int sa_index = 0; sa_index < sa_result.size(); ++sa_index) {
+    if (comm.rank_signed() == 0) {
+        bwt_pos = 1; // The first char in the bwt is always the end of text symbol, so we can start at position 1
+    }
+    // ignore the last index for now
+    // PE 0 skips the first suffix, because it will be 0, all other PEs start with the first suffix
+    for (int sa_index = comm.rank_signed() == 0 ? 1 : 0; sa_index < sa_result.size() - 1; ++sa_index) {
         auto suffix = sa_result[sa_index];
         // Get the phrase the suffix belongs to
         auto suffix_phrase = get_phrase(suffix, phrase_mapping, params.window_size);
@@ -274,6 +330,7 @@ int main(int argc, char const* argv[]) {
 
         if (suffix_phrase.first == 0) {
             // Suffix is in the delimiter or smaller than the window size
+            hard_chars_open = false;
             continue;
         }
         if (suffix_phrase.second) {
@@ -282,6 +339,7 @@ int main(int argc, char const* argv[]) {
             // todo add elements to first_chars
             // auto pre_chars = get_chars_before_phrase(suffix_phrase, dict, comm);
             //bwt_pos += pre_chars.size();
+            hard_chars_open = false;
             continue;
         }
         else {
@@ -290,6 +348,7 @@ int main(int argc, char const* argv[]) {
             auto suffix_len = suffix_lens[sa_index];
 
             if (lcp_result[sa_index + 1] < suffix_len) {
+                hard_chars_open = false;
                 // The phrase suffix is larger than the lcp value, so the first char in the bwt is the char before the suffix
                 // store the prev char that is needed
                 prev_chars.emplace_back(phrase_index, suffix);
@@ -302,12 +361,22 @@ int main(int argc, char const* argv[]) {
             else {
                 // The phrase suffix is larger the order of the suffixes can not be decided by the phrase alone
                 // we need to take the parse into account
-                //
+                hard_chars.emplace_back(suffix, suffix_phrase.first);
+                // if this flag is set, the current sa index is part of a hard case, so we dont need to store the position,
+                // but the lens have to be updated
+                if (hard_chars_open) {
+                    hard_chars_len.back() += phrase_occ[phrase_index - 1];
+                    continue;
+                }
+                // first hard char found at this position
+                else {
+                    hard_chars_idx.push_back(bwt_pos);
+                    hard_chars_len.push_back(phrase_occ[phrase_index - 1]);
+                    hard_chars_open = true;
+                }
             }
         }
-
     }
-
 
     // Request the prev chars and fill the bwt
     auto p_chars = get_prev_chars(out, prev_chars, phrase_prefixes, comm);
@@ -318,6 +387,36 @@ int main(int argc, char const* argv[]) {
             bwt[pos + i] = c;
         }
         index++;
+    }
+
+    // Solve the hard cases
+    uint32_t current_hard_case = 0;
+
+    std::vector<std::pair<uint32_t, uint64_t>> hard_chars_requests;
+    for (auto len : hard_chars_len) {
+
+        // Get the sa indices that compete for the same position in the bwt
+        std::span curr_hard_chars(hard_chars.begin() + current_hard_case, hard_chars.begin() + current_hard_case + len);
+        // This orders the phrase_ids of the current hard case
+        auto case_order = solve_hard_cases(curr_hard_chars, global_parse);
+        std::map<uint32_t, uint32_t> phrase_to_sa_index;
+        for (auto& [sa_index, phrase_id] : curr_hard_chars) {
+            phrase_to_sa_index[phrase_id] = sa_index;
+        }
+        for (auto phrase_id : case_order) {
+            hard_chars_requests.emplace_back(phrase_id, phrase_to_sa_index[phrase_id]);
+        }
+        ++current_hard_case;
+    }
+
+    auto hard_prev_chars = get_prev_chars(out, hard_chars_requests, phrase_prefixes, comm);
+
+    int char_pos = 0;
+    for (size_t hard_index = 0; hard_index < hard_chars_idx.size(); ++hard_index) {
+        for (size_t hard_count = 0; hard_count < hard_chars_len[hard_index]; ++hard_count) {
+            bwt[hard_chars_idx[hard_index] + hard_count] = hard_prev_chars[char_pos];
+            ++char_pos;
+        }
     }
 
     timer.aggregate_and_print(kamping::measurements::SimpleJsonPrinter<>(logger::get_ostream()));
