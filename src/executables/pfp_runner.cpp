@@ -113,9 +113,10 @@ std::vector<unsigned char> get_prev_chars(std::vector<unsigned char>& phrases, s
     std::vector<std::vector<uint32_t>> requests(comm.size());
     std::vector<int> pe_order;
     for (auto& [phrase_id, suffix]: prev_chars) {
-        auto it = std::ranges::lower_bound(phrase_prerfix_sum, phrase_id);
+        // find the PE which has suffix - 1 in it local phrases
+        auto it = std::ranges::upper_bound(phrase_prerfix_sum, suffix - 1);
         size_t pe = std::distance(phrase_prerfix_sum.begin(), it);
-        // offset is the value of the previous prefix sum, 0 in case of PE 0
+        // offset is the value of the previous prefix sum value, 0 in case of PE 0
         auto offset = pe == 0 ? 0 : *(it - 1);
         requests[pe].push_back(suffix - offset);
         pe_order.push_back(pe);
@@ -183,14 +184,15 @@ std::vector<std::vector<uint32_t>> compute_inverted_list(
 }
 std::vector<unsigned char> permutate_last_chars(const std::vector<uint32_t>& parse_bwt, const std::vector<unsigned char>& last_char_per_phrase, const Communicator<std::vector>& comm) {
     // todo this is not efficient
-    auto all_last_chars = comm.allgather(send_buf(last_char_per_phrase));
+    auto all_last_chars = comm.allgatherv(send_buf(last_char_per_phrase));
 
     std::vector<unsigned char> permutated_last_chars(parse_bwt.size());
     for (size_t i = 0; i < parse_bwt.size(); ++i) {
         auto phrase_id = parse_bwt[i];
         permutated_last_chars[i] = all_last_chars[phrase_id - 1];
     }
-    return permutated_last_chars;
+    // todo this can stay local when the main loop is fixed
+    return comm.allgatherv(send_buf(permutated_last_chars));//permutated_last_chars;
 
 }
 int main(int argc, char const* argv[]) {
@@ -277,6 +279,8 @@ int main(int argc, char const* argv[]) {
     auto [sorted_dict_string, last_char_per_phrase] = convert_dict_to_string(out, params.window_size);
     timer.stop();
 
+    char x = out.front();
+
     timer.synchronize_and_start("Compute LCP and SA of D");
     auto sa = sa_builder();
     sa.construct_sa_lcp(comm.mpi_communicator(), sorted_dict_string);
@@ -312,19 +316,27 @@ int main(int argc, char const* argv[]) {
     auto parse_bwt = compute_bwt(ranks_out, comm);
     timer.stop();
 
+    std::cout << "Passed BWT of P" << std::endl;
+
     timer.synchronize_and_start("Compute inverted list of the BWT of P");
     auto inverted_list = compute_inverted_list(parse_bwt, global_max_rank, comm);
     timer.stop();
+
+    std::cout << "Passed inverted list of BWT of P" << std::endl;
 
     /*bool t = check_sa(sa_result, dict, comm);
     logger::print_on_root("SA check for D: {}", t);*/
 
     timer.synchronize_and_start("Compute phrase suffix lengths");
-    auto phrase_offsets = comm.exscan_single(send_buf(out.size()), op(kamping::ops::plus<>()));
-    auto local_phrase_prefix_sum = comm.scan(send_buf(static_cast<uint32_t>(out.size())), op(kamping::ops::plus<>()));
+    // Get the offset for each PEs phrases , PE 0 = 0, PE 1 = |PE(0).phrases|, ...
+    auto phrase_offsets = comm.exscan_single(send_buf(out.size()), op(kamping::ops::plus<>()), values_on_rank_0(0));
+    // Get the prefix sum of the sizes:
+    auto local_phrase_prefix_sum = comm.scan_single(send_buf(static_cast<uint32_t>(out.size())), op(kamping::ops::plus<>()));
     auto global_phrase_prefix_sum = comm.allgather(send_buf(local_phrase_prefix_sum));
     auto suffix_lens = suffix_to_phrase_lens(sa_result, global_phrase_prefix_sum, comm, out, phrase_offsets);
     timer.stop();
+
+    std::cout << "Passed phrase suffix lengths" << std::endl;
 
     timer.synchronize_and_start("Permutate the W array");
     auto w_array = permutate_last_chars(parse_bwt, last_char_per_phrase, comm);
@@ -332,11 +344,13 @@ int main(int argc, char const* argv[]) {
 
 
     // Main loop to construct the BWT
-    std::vector<unsigned char> bwt(sa_result.size());
+    // todo sa_result.size() * 10 should be an upper bound, is there a better way to handle this?
+    std::vector<unsigned char> bwt(sa_result.size() * 10);
     bwt.reserve(sa_result.size());
 
     timer.synchronize_and_start("Main BWT loop");
 
+    std::cout << "Reached Main Loop" << std::endl;
     // todo this does not scale
     auto global_parse = comm.allgatherv(send_buf(ranks_out));
 
@@ -376,6 +390,7 @@ int main(int argc, char const* argv[]) {
             // The actual chars are retrieved from the permutated W array
             auto& inverted_list_index = inverted_list[suffix_phrase.first];
                 for (auto pos: inverted_list_index) {
+                    // todo w_array is distributed, need to request these as well
                     bwt.push_back(w_array[pos]);
                     bwt_pos++;
                 }
@@ -393,6 +408,7 @@ int main(int argc, char const* argv[]) {
                 // store the prev char that is needed
                 prev_chars.emplace_back(phrase_index, suffix);
                 // store its position and needed length in the bwt
+                // todo it could be the case that this stretches accross the bwt border
                 prev_chars_pos.emplace_back(bwt_pos, phrase_occ[phrase_index - 1]);
                 bwt_pos += phrase_occ[phrase_index - 1];
                 // todo check if the phrases is on this PE, in this case the char can be included directly
@@ -420,18 +436,25 @@ int main(int argc, char const* argv[]) {
 
     timer.stop();
 
+    std::cout << "Finished loop, start prev char exchange" << std::endl;
+
     timer.synchronize_and_start("Retrieving easy prev chars");
     // Request the prev chars and fill the bwt
-    auto p_chars = get_prev_chars(out, prev_chars, phrase_prefixes, comm);
+    auto p_chars = get_prev_chars(out, prev_chars, global_phrase_prefix_sum, comm);
     int index = 0;
-    for (auto [pos, size] : prev_chars_pos) {
+    for (auto& [pos, size] : prev_chars_pos) {
         auto c = p_chars[index];
         for (size_t i = 0; i < size; ++i) {
+            if (pos + i >= bwt.size()) {
+                std::cout << "Error: position " << pos + i << " is out of bounds for the bwt of size " << bwt.size() << std::endl;
+            }
             bwt[pos + i] = c;
         }
         index++;
     }
     timer.stop();
+
+    std::cout << "Finished prev char exchange, start solving hard cases" << std::endl;
 
     timer.synchronize_and_start("Solve hard cases");
 
