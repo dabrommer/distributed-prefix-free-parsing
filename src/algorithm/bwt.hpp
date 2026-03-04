@@ -61,6 +61,7 @@ std::vector<uint32_t> compute_bwt(std::vector<char_type>& parse, Communicator<>&
     auto chunk_size = total_size / comm.size();
     auto left_over  = total_size % comm.size();
 
+
     if (comm.rank_signed() < left_over)
         offset = comm.rank_signed() * (chunk_size + 1);
     else
@@ -77,6 +78,7 @@ std::vector<uint32_t> compute_bwt(std::vector<char_type>& parse, Communicator<>&
             continue;
         } else {
             // index on other pe
+            // todo store this so we dont need to call it again to process the responses
             auto pe = get_pe_from_index(index, chunk_size, left_over, comm_size);
             requests[pe].push_back(index);
         }
@@ -147,7 +149,5 @@ std::vector<uint32_t> compute_bwt(std::vector<char_type>& parse, Communicator<>&
     if (comm.rank_signed() == 0) {
         std::cout << "BWT result size: " << bwt.size() << std::endl;
     }
-    timer.aggregate_and_print(kamping::measurements::SimpleJsonPrinter<>(std::cout));
-
-    return std::move(bwt);
+    return bwt;
 }

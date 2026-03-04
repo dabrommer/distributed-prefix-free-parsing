@@ -49,7 +49,7 @@ inline DictResult convert_dict_to_string(std::vector<unsigned char> const& dict_
     result.sorted_dict_string.reserve(dict_data.size());
 
     for (int i = 0; i < dict_data.size(); ++i) {
-        char c = dict_data[i];
+        char c = static_cast<char>(dict_data[i]);
         if (c == DELIMITER) {
             result.sorted_dict_string.push_back(DELIMITER + 1);
             // Store the last char of each phrase
@@ -57,7 +57,7 @@ inline DictResult convert_dict_to_string(std::vector<unsigned char> const& dict_
         } else if (c == DOLLAR) {
             result.sorted_dict_string.push_back(DOLLAR + 1);
         } else {
-            result.sorted_dict_string.push_back(static_cast<char>(c));
+            result.sorted_dict_string.push_back(c);
         }
     }
 
