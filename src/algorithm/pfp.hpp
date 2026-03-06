@@ -44,21 +44,51 @@ struct DictResult {
     std::vector<unsigned char> last_char_per_phrase;
 };
 
-inline DictResult convert_dict_to_string(std::vector<unsigned char> const& dict_data, int window_size) {
+inline DictResult convert_dict_to_string(std::vector<unsigned char> const& dict_data, int window_size, Communicator<>& comm) {
     DictResult result;
     result.sorted_dict_string.reserve(dict_data.size());
+    unsigned char last_char = DELIMITER;
+    bool first_phrase = true;
 
     for (int i = 0; i < dict_data.size(); ++i) {
         char c = static_cast<char>(dict_data[i]);
         if (c == DELIMITER) {
             result.sorted_dict_string.push_back(DELIMITER + 1);
             // Store the last char of each phrase
+            // Edge case: after redistribution of the phrases, the phrases on a PE could have the delimiter in the
+            // first window_size many chars, in this case the last char of this phrase is on the previous PE
+            if (first_phrase) {
+                first_phrase = false;
+                int first_phrase_not_local = i - window_size < 0;
+                int need_comm = comm.sendrecv<int>(send_buf(first_phrase_not_local), destination(comm.rank_shifted_cyclic(-1)), source(comm.rank_shifted_cyclic(1))).front();
+                // Communication to prev and next PE needed
+                if (first_phrase_not_local && need_comm) {
+                    int offset = comm.sendrecv<int>(send_buf(i), destination(comm.rank_shifted_cyclic(-1)), source(comm.rank_shifted_cyclic(1))).front();
+                    last_char = dict_data[dict_data.size() - (window_size - offset - 1)];
+                    continue;
+                }
+                // Only receive the offset from the next PE and store the last char of the last phrase
+                else if (need_comm) {
+                    int offset = comm.recv_single<int>(source(comm.rank_shifted_cyclic(1)));
+                    last_char = dict_data[dict_data.size() - (window_size - offset - 1)];
+                }
+                // Only send the offset to the previous PE and skip this phrase, because the last char of this phrase is on the previous PE
+                else if (first_phrase_not_local) {
+                    comm.send(send_buf(i), destination(comm.rank_shifted_cyclic(-1)));
+                    continue;
+                }
+            }
+
             result.last_char_per_phrase.push_back(dict_data[i - window_size]);
         } else if (c == DOLLAR) {
             result.sorted_dict_string.push_back(DOLLAR + 1);
         } else {
             result.sorted_dict_string.push_back(c);
         }
+    }
+
+    if (last_char != DELIMITER) {
+        result.last_char_per_phrase.push_back(last_char);
     }
 
     return result;
@@ -106,6 +136,8 @@ inline Parse compute_dict(
     rabin_karp                 kr(params.window_size);
     std::vector<uint64_t>      hashes;
     hashes.reserve(splits.size());
+
+    // todo edge case with empty splits
 
     // Prepend $ to the first phrase
     if (comm.rank_signed() == 0) {
