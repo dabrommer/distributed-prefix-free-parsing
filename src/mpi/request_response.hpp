@@ -30,7 +30,8 @@ std::vector<ResponseType> get_responses_in_order(
     std::vector<ResponseType> result;
     result.reserve(pe_order.size());
 
-    for (int pe : pe_order) {
+    for (int i = 0; i < responses.size(); ++i) {
+        int pe = pe_order[i];
         // Get the next response from this PE
         size_t pe_offset = offsets[pe] + consumed[pe];
         result.push_back(responses[pe_offset]);
@@ -76,6 +77,10 @@ auto request_response(
         while (curr_pe_idx >= recv_counts[curr_pe] && curr_pe < comm.size() - 1) {
             ++curr_pe;
             curr_pe_idx = 0;
+        }
+        if (curr_pe >= comm.size()) {
+            // This should not happen if recv_counts are correct
+            throw std::runtime_error("Received more requests than expected");
         }
         responses[curr_pe].push_back(process_request(request));
         ++curr_pe_idx;

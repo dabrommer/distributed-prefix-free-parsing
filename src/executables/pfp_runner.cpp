@@ -10,6 +10,8 @@
 #include "kamping/measurements/printer.hpp"
 #include "kamping/measurements/timer.hpp"
 #include "kamping/collectives/scan.hpp"
+#include "kamping/p2p/send.hpp"
+#include "kamping/p2p/recv.hpp"
 #include "mpi/data_distribution.hpp"
 #include "mpi/mpi_utils.hpp"
 #include "mpi/request_response.hpp"
@@ -268,7 +270,7 @@ int main(int argc, char const* argv[]) {
     // Redistribute phrases and get phrases in a std::string which is needed by psac
     timer.synchronize_and_start("Prepare computation of the LCP and SA of D");
     auto out                                        = redistribute_block_balanced(sorted_dict, comm);
-    auto [sorted_dict_string, last_char_per_phrase] = convert_dict_to_string(out, params.window_size);
+    auto [sorted_dict_string, last_char_per_phrase] = convert_dict_to_string(out, params.window_size, comm);
     timer.stop();
 
     char x = out.front();
@@ -361,8 +363,17 @@ int main(int argc, char const* argv[]) {
     std::vector<uint32_t> hard_chars_len;
 
     size_t bwt_pos = 0;
+    // The last
     if (comm.rank_signed() == 0) {
         bwt_pos = 1; // The first char in the bwt is always the end of text symbol, so we can start at position 1
+        auto first_char = comm.recv<unsigned char>(source(comm.size() - 1));
+        bwt[0] = first_char.front();
+    }
+    else if (comm.rank_signed() == comm.size() - 1) {
+        // todo what is the first char of the bwt? (what is the last char of the input data?)
+        // This is just the last char of the lex largest phrase
+        auto last_char = out[out.size() - params.window_size];
+        comm.send(send_buf(last_char), destination(0));
     }
     // ignore the last index for now
     // PE 0 skips the first suffix, because it will be 0, all other PEs start with the first suffix
@@ -408,7 +419,7 @@ int main(int argc, char const* argv[]) {
                 hard_chars_len.push_back(1);
                 hard_chars_idx.push_back(bwt_pos);
                 hard_chars.emplace_back(suffix, suffix_phrase.first);
-                while (lcp_result[sa_index + 1] > suffix_lens[sa_index]) {
+                while (sa_index < sa_result.size() - 1 && lcp_result[sa_index + 1] > suffix_lens[sa_index]) {
                     // Loop to find all next suffixes that belong to this hard case, they all compete for the same position in the bwt
                     bwt_pos += phrase_occ[phrase_index - 1];
 
