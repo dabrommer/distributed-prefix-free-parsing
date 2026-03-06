@@ -4,13 +4,26 @@
 #include "CLI/App.hpp"
 #include "util/CLI_mpi.hpp"
 
+
+// for debugging, set the Big-BWT executable path using BIG_BWT_PATH
+std::string getBWTPath()
+{
+    if(const char* env = std::getenv("BIG_BWT_PATH"))
+        return env;
+
+    return {};
+}
+
 struct Params {
     std::string input_path;
     int         window_size = 10;
-    std::string hash;
+    std::string bwt_check_path = getBWTPath();
     int         p_mod   = 100;
     bool        verbose = false;
 };
+
+
+
 
 Params read_parameters(int argc, char const* argv[]) {
     CLI::App app{"Prefix Free Parsing"};
@@ -20,6 +33,7 @@ Params read_parameters(int argc, char const* argv[]) {
     app.add_option("-w", params.window_size, "Window size");
     app.add_option("-p", params.p_mod, "Modulo for hash splitters");
     app.add_option("--verbose", params.verbose, "Verbose output");
+    app.add_option("--bwt-exec-path", params.bwt_check_path, "Path to Big-BWT executable to check result");
 
     CLI11_PARSE_MPI(app, argc, argv);
 

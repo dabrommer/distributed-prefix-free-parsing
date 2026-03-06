@@ -5,6 +5,7 @@
 #include "AmsSort/AmsSort.hpp"
 #include "algorithm/bwt.hpp"
 #include "algorithm/pfp.hpp"
+#include "checks/check_bwt.hpp"
 #include "checks/check_parsing.hpp"
 #include "checks/check_sa.hpp"
 #include "kamping/measurements/printer.hpp"
@@ -495,6 +496,9 @@ int main(int argc, char const* argv[]) {
 
     timer.stop();
     timer.aggregate_and_print(kamping::measurements::SimpleJsonPrinter<>(logger::get_ostream()));
+
+    bool bwt_correct = check_bwt(params.input_path, comm, bwt, params.bwt_check_path);
+    logger::print_on_root("BWT check is: {}", bwt_correct);
 
     return 0;
 }
